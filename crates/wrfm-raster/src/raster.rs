@@ -14,22 +14,43 @@
 /// the cells byte-identical to the Canvas path.
 pub use ratatui::symbols::braille::BRAILLE;
 
-/// The canvas-space window `[left, right] x [bottom, top]` that lines are
-/// clipped against and mapped into (canvas y grows UP).
+/// Where a frame is drawn: the braille dot grid and the canvas-space
+/// window `[left, right] x [bottom, top]` that lines are clipped against
+/// and mapped into (canvas y grows UP).
 ///
-/// For the full frame this is the centered box `[-px_w/2, px_w/2] x
-/// [-px_h/2, px_h/2]`; a region zoom (CLI `--region` / `--fit content`)
-/// yields an off-center window with the same mapping.
+/// The two are one value because they are one decision — every mapping
+/// needs both, and the dots-per-cell factor (`2` wide, `4` tall) relates
+/// them. As separate arguments a caller could pair a grid with a window of
+/// a different shape, which would scale the frame wrong; there is no way
+/// to express that here.
+///
+/// Build it ONCE per frame and pass it by value ([`Viewport`] is `Copy`).
+/// The window is a property of the frame, not of a line, and rebuilding it
+/// per line means re-deriving the same spans on every line.
+///
+/// For the full frame use [`Viewport::centered`] — the centered box
+/// `[-px_w/2, px_w/2] x [-px_h/2, px_h/2]`. A region zoom (CLI `--region`
+/// / `--fit content`) yields an off-center window with the same mapping:
+/// [`Viewport::from_arrays`].
+///
+/// A degenerate window (`right <= left` or `top <= bottom`, i.e. a
+/// zero-or-negative span) draws nothing, matching ratatui's `get_point`
+/// guard; that is what a `--width 0` canvas derives.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Bounds {
-    pub left: f64,
-    pub right: f64,
-    pub bottom: f64,
-    pub top: f64,
+pub struct Viewport {
+    /// Canvas-space clipping window, `[left, right] x [bottom, top]`.
+    left: f64,
+    right: f64,
+    bottom: f64,
+    top: f64,
+    /// The grid in DOTS — `cells * 2` wide, `cells * 4` tall.
+    px_w: usize,
+    px_h: usize,
 }
 
-impl Bounds {
-    /// The window for a `px_w` x `px_h` dot grid centered on the origin.
+impl Viewport {
+    /// The full-frame window for a `px_w` x `px_h` dot grid centered on the
+    /// origin — the shape the TUI paints every frame.
     pub fn centered(px_w: usize, px_h: usize) -> Self {
         let (w, h) = (px_w as f64, px_h as f64);
         Self {
@@ -37,54 +58,181 @@ impl Bounds {
             right: w / 2.0,
             bottom: -h / 2.0,
             top: h / 2.0,
+            px_w,
+            px_h,
         }
     }
 
-    /// Build from a canvas x/y bounds pair (`[min, max]` per axis), the
-    /// shape ratatui's `Canvas::x_bounds` / `y_bounds` take.
-    pub fn from_arrays(x_bounds: [f64; 2], y_bounds: [f64; 2]) -> Self {
+    /// A `px_w` x `px_h` dot grid over an explicit canvas window, given as
+    /// the x/y bounds pair (`[min, max]` per axis) ratatui's
+    /// `Canvas::x_bounds` / `y_bounds` take.
+    pub fn from_arrays(px_w: usize, px_h: usize, x_bounds: [f64; 2], y_bounds: [f64; 2]) -> Self {
         Self {
             left: x_bounds[0],
             right: x_bounds[1],
             bottom: y_bounds[0],
             top: y_bounds[1],
+            px_w,
+            px_h,
         }
+    }
+
+    /// The grid width in DOTS (`cells * 2`).
+    #[inline]
+    pub fn px_w(&self) -> usize {
+        self.px_w
+    }
+
+    /// The grid height in DOTS (`cells * 4`).
+    #[inline]
+    pub fn px_h(&self) -> usize {
+        self.px_h
+    }
+
+    /// The number of character CELLS this viewport covers — the length of a
+    /// per-cell pattern/color buffer. [`dots_to_lines`] takes the CELL count
+    /// (`cw`, `ch`), not the dot count.
+    #[inline]
+    pub fn cells(&self) -> usize {
+        (self.px_w / 2) * (self.px_h / 4)
+    }
+
+    /// The canvas window being clipped against, `[left, right, bottom, top]`
+    /// — what a ratatui `Canvas` needs for `x_bounds` / `y_bounds` to
+    /// reproduce this frame.
+    #[inline]
+    pub fn window(&self) -> [f64; 4] {
+        [self.left, self.right, self.bottom, self.top]
+    }
+
+    /// The window's horizontal span (`right - left`).
+    ///
+    /// Subtraction is exact, so deriving it on demand rather than storing it
+    /// loses nothing and keeps the struct one word smaller.
+    #[inline]
+    fn width(&self) -> f64 {
+        self.right - self.left
+    }
+
+    /// The window's vertical span (`top - bottom`).
+    #[inline]
+    fn height(&self) -> f64 {
+        self.top - self.bottom
+    }
+
+    /// Map a coordinate, measured from `origin` and spanning `span`, onto
+    /// dot `0..=dots - 1`; `None` when `inside` says it is out of window.
+    ///
+    /// `inside` is the window test, and it cannot be folded into a range
+    /// check on the mapped value even though the mapping sends the window's
+    /// edges to dot 0 and dot `dots - 1`: a coordinate half a dot OUTSIDE
+    /// the window still rounds into `0..=dots - 1` (`x = left - 0.4` maps to
+    /// dot 0), so the range check alone lights a cell just past the frame.
+    /// Both tests are load-bearing, and `inside` is the one that rejects a
+    /// non-finite coordinate — every comparison against NaN is false.
+    ///
+    /// The multiply happens BEFORE the divide on purpose. Written that way
+    /// it is one correctly rounded operation: the rounded result of the
+    /// exact expression, with no error of its own to contribute. Hoisting
+    /// the ratio into a per-frame constant instead (`k = (dots - 1) / span`,
+    /// then `v = (x - origin) * k`) trades that away — `k` is rounded first,
+    /// and the error is then scaled by the coordinate, so a value that lands
+    /// exactly on a `.5` tie can round to the neighbouring dot. Measured on
+    /// this grid: 4 of 149 tie values at 200 dots and 23 of 146 at 199 dots
+    /// flipped a whole cell, while this form flipped none. It is a
+    /// micro-optimization worth ~1 ns per coordinate — do not take it.
+    #[inline]
+    fn dot(
+        x: f64,
+        origin: f64,
+        dots: usize,
+        span: f64,
+        inside: impl FnOnce() -> bool,
+    ) -> Option<usize> {
+        if !inside() {
+            return None;
+        }
+        let v = (x - origin) * (dots as f64 - 1.0) / span;
+        (v >= 0.0 && v <= dots as f64 - 1.0).then(|| v.round() as usize)
+    }
+
+    /// Canvas `x` -> dot column: measured up from the window's left edge.
+    #[inline]
+    fn dot_x(&self, x: f64) -> Option<usize> {
+        Self::dot(x, self.left, self.px_w, self.width(), || {
+            x >= self.left && x <= self.right
+        })
+    }
+
+    /// Canvas `y` (+y UP) -> dot row (down): measured down from the window's
+    /// top, so the sign flips here rather than at every call site.
+    #[inline]
+    fn dot_y(&self, y: f64) -> Option<usize> {
+        Self::dot(self.top - y, 0.0, self.px_h, self.height(), || {
+            y >= self.bottom && y <= self.top
+        })
     }
 }
 
 /// Rasterize one line segment into a 2x4-dot-per-cell braille grid.
 ///
 /// * `(x1, y1) -> (x2, y2)` — canvas coordinates (+y up).
-/// * `px_w`, `px_h` — the grid in DOTS (`cells * 2` wide, `cells * 4` tall).
-/// * `bounds` — the canvas window to clip and map against.
+/// * `vp` — the grid and the window to clip and map against; see
+///   [`Viewport`]. Build it once per frame and reuse it for every line.
 /// * `on_cell(cell, bit)` — called for every dot on the line with its cell
 ///   index and pattern bit; the caller owns the buffers (pattern + color).
 ///   It is called even for dots that are already lit, so a later line can
 ///   overwrite the cell's color — exactly like the Canvas layer order.
-///
-/// A degenerate window (`right <= left` or `top <= bottom`) draws nothing,
-/// matching ratatui's `get_point` guard.
-#[allow(clippy::too_many_arguments)] // primitive geometry helper (x1,y1,x2,y2 + grid + window + sink)
 #[inline]
 pub fn rasterize_line(
     x1: f64,
     y1: f64,
     x2: f64,
     y2: f64,
-    px_w: usize,
-    px_h: usize,
-    bounds: Bounds,
+    vp: Viewport,
     mut on_cell: impl FnMut(usize, u8),
 ) {
-    let Some((cx1, cy1, cx2, cy2)) = clip_line(x1, y1, x2, y2, bounds) else {
+    let Some((cx1, cy1, cx2, cy2)) = clip_line(x1, y1, x2, y2, vp) else {
         return;
     };
-    let Some((dx1, dy1)) = get_point(cx1, cy1, px_w, px_h, bounds) else {
+    // A degenerate window (zero/negative span — what a `--width 0` canvas
+    // derives) maps nothing. It has to be checked before mapping: the
+    // per-coordinate range test below already rejects a non-finite
+    // coordinate, but a plain `0 / 0` span leaves `v` NaN for a point
+    // sitting exactly on the window edge, and `f64 as usize` would turn
+    // that into dot 0.
+    if vp.width() <= 0.0 || vp.height() <= 0.0 {
+        return;
+    }
+    // A non-finite coordinate has to be rejected HERE, and it is the one
+    // case `clip_line` cannot see: every region-code comparison against NaN
+    // is false, so a NaN point comes out of the clipper looking like a point
+    // inside the window. Without this it maps to a real-looking cell (the
+    // `as usize` cast turns NaN into 0) and the segment is drawn as a line
+    // invented out of nothing.
+    if !(cx1.is_finite() && cy1.is_finite() && cx2.is_finite() && cy2.is_finite()) {
+        return;
+    }
+    // One endpoint at a time, exactly as the pair of `get_point` calls this
+    // replaced. Mapping all four coordinates in one pass against spans
+    // derived once is the obvious cleanup and measured 26-34% SLOWER here:
+    // each endpoint's two divisions currently schedule against the other
+    // endpoint's, and splitting x from y across the line loses that overlap.
+    // Every `dot_x`/`dot_y` call therefore re-derives its span, and that is
+    // the fast shape.
+    let Some(dx1) = vp.dot_x(cx1) else {
         return;
     };
-    let Some((dx2, dy2)) = get_point(cx2, cy2, px_w, px_h, bounds) else {
+    let Some(dy1) = vp.dot_y(cy1) else {
         return;
     };
+    let Some(dx2) = vp.dot_x(cx2) else {
+        return;
+    };
+    let Some(dy2) = vp.dot_y(cy2) else {
+        return;
+    };
+    let (px_w, px_h) = (vp.px_w(), vp.px_h());
     bresenham(dx1, dy1, dx2, dy2, |x, y| {
         if x >= px_w || y >= px_h {
             return;
@@ -122,9 +270,7 @@ pub fn rasterize_camera_line(
     a: [f64; 3],
     b: [f64; 3],
     project: impl Fn([f64; 3]) -> (f64, f64),
-    px_w: usize,
-    px_h: usize,
-    bounds: Bounds,
+    vp: Viewport,
     on_cell: impl FnMut(usize, u8),
 ) {
     let Some((p1, p2)) = clip_near(a, b) else {
@@ -132,7 +278,7 @@ pub fn rasterize_camera_line(
     };
     let (x1, y1) = project(p1);
     let (x2, y2) = project(p2);
-    rasterize_line(x1, y1, x2, y2, px_w, px_h, bounds, on_cell);
+    rasterize_line(x1, y1, x2, y2, vp, on_cell);
 }
 
 /// Clip a camera-space segment at the near plane, returning two
@@ -183,11 +329,17 @@ pub fn dots_to_lines(dots: &[u8], cw: usize, ch: usize) -> Vec<String> {
         .collect()
 }
 
-/// Cohen-Sutherland clip against `[left, right] x [bottom, top]` — the same
+/// Cohen-Sutherland clip against the viewport's window — the same
 /// algorithm, region order and intersection expressions as the
-/// `line_clipping` crate ratatui uses (verified bit-identical).
-fn clip_line(x1: f64, y1: f64, x2: f64, y2: f64, b: Bounds) -> Option<(f64, f64, f64, f64)> {
-    let (left, right, bottom, top) = (b.left, b.right, b.bottom, b.top);
+/// `line_clipping` crate ratatui uses, so the visible part lands where the
+/// Canvas path puts it.
+///
+/// The endpoint it had to move lands exactly ON a window edge, or inside;
+/// the endpoint that was already inside passes through untouched. That is
+/// why a caller cannot skip its own window test on the strength of having
+/// clipped (see [`rasterize_line`]).
+fn clip_line(x1: f64, y1: f64, x2: f64, y2: f64, vp: Viewport) -> Option<(f64, f64, f64, f64)> {
+    let (left, right, bottom, top) = (vp.left, vp.right, vp.bottom, vp.top);
     let mut p1 = (x1, y1);
     let mut p2 = (x2, y2);
     let mut r1 = region_code(p1, left, right, bottom, top);
@@ -250,26 +402,6 @@ fn intersect(
     debug_assert!(region & 8 != 0);
     let x = p1.0 + (top - p1.1) * dx / dy;
     (x, top)
-}
-
-/// Canvas -> dot-grid mapping (`Painter::get_point`): reject points outside
-/// the window, then scale-and-round into `[0, px_w - 1] x [0, px_h - 1]`
-/// using the GRID resolution for the scale and the window for the span.
-/// A degenerate window maps nothing (ratatui's `width <= 0` guard).
-fn get_point(x: f64, y: f64, px_w: usize, px_h: usize, b: Bounds) -> Option<(usize, usize)> {
-    if x < b.left || x > b.right || y < b.bottom || y > b.top {
-        return None;
-    }
-    let width = b.right - b.left;
-    let height = b.top - b.bottom;
-    if width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-    let px_wf = px_w as f64;
-    let px_hf = px_h as f64;
-    let xd = ((x - b.left) * (px_wf - 1.0) / width).round() as usize;
-    let yd = ((b.top - y) * (px_hf - 1.0) / height).round() as usize;
-    Some((xd, yd))
 }
 
 /// Bresenham line stepping, byte-identical to ratatui's
@@ -341,19 +473,9 @@ mod tests {
     use super::*;
 
     /// Collect the dots a single line lights, as (cell, bit) pairs.
-    fn dots_of(
-        x1: f64,
-        y1: f64,
-        x2: f64,
-        y2: f64,
-        px_w: usize,
-        px_h: usize,
-        bounds: Bounds,
-    ) -> Vec<(usize, u8)> {
+    fn dots_of(x1: f64, y1: f64, x2: f64, y2: f64, vp: Viewport) -> Vec<(usize, u8)> {
         let mut v = Vec::new();
-        rasterize_line(x1, y1, x2, y2, px_w, px_h, bounds, |cell, bit| {
-            v.push((cell, bit))
-        });
+        rasterize_line(x1, y1, x2, y2, vp, |cell, bit| v.push((cell, bit)));
         v
     }
 
@@ -381,9 +503,9 @@ mod tests {
     #[test]
     fn centered_line_lights_the_expected_cells() {
         // 4x2 cells = 8x8 dots; window [-4,4]x[-4,4].
-        let b = Bounds::centered(8, 8);
+        let vp = Viewport::centered(8, 8);
         // A horizontal line across the middle row of dots (y=0 -> dot row 3).
-        let dots = dots_of(-4.0, 0.0, 4.0, 0.0, 8, 8, b);
+        let dots = dots_of(-4.0, 0.0, 4.0, 0.0, vp);
         assert!(!dots.is_empty(), "a full-width line must light dots");
         // Every dot: cell = (y>>2)*4 + (x>>1), bit = (x&1) + 2*(y&3) — all
         // in range for an 8x8 grid.
@@ -392,43 +514,60 @@ mod tests {
             assert!(bit.count_ones() == 1 && *bit != 0, "bit {bit}");
         }
         // Single dot at the origin maps to the center-ish dot of the grid.
-        let dots = dots_of(0.0, 0.0, 0.0, 0.0, 8, 8, b);
+        let dots = dots_of(0.0, 0.0, 0.0, 0.0, vp);
         assert_eq!(dots.len(), 1, "a point lights exactly one dot");
     }
 
     #[test]
     fn degenerate_bounds_draw_nothing() {
-        // w=0/h=0 CLI canvases derive a zero-width window: ratatui's
-        // get_point guard rejects everything, so the frame stays blank.
-        let b = Bounds::from_arrays([0.0, 0.0], [0.0, 0.0]);
-        let dots = dots_of(-5.0, -5.0, 5.0, 5.0, 2, 4, b);
+        // A zero-width/zero-height window (what a w=0/h=0 CLI canvas
+        // derives) maps nothing, so the frame stays blank.
+        let vp = Viewport::from_arrays(2, 4, [0.0, 0.0], [0.0, 0.0]);
+        let dots = dots_of(-5.0, -5.0, 5.0, 5.0, vp);
         assert!(dots.is_empty(), "degenerate window must draw nothing");
-        let b = Bounds::from_arrays([-10.0, 10.0], [5.0, -5.0]); // inverted y
-        let dots = dots_of(-5.0, -5.0, 5.0, 5.0, 2, 4, b);
+        let vp = Viewport::from_arrays(2, 4, [-10.0, 10.0], [5.0, -5.0]); // inverted y
+        let dots = dots_of(-5.0, -5.0, 5.0, 5.0, vp);
         assert!(dots.is_empty(), "inverted window must draw nothing");
     }
 
     #[test]
     fn off_window_lines_are_clipped_or_rejected() {
-        let b = Bounds::centered(8, 8);
+        let vp = Viewport::centered(8, 8);
         // Fully outside -> nothing.
-        assert!(dots_of(100.0, 100.0, 200.0, 200.0, 8, 8, b).is_empty());
+        assert!(dots_of(100.0, 100.0, 200.0, 200.0, vp).is_empty());
         // Crossing the window -> clipped to it (endpoints inside).
-        let dots = dots_of(-100.0, 0.0, 100.0, 0.0, 8, 8, b);
+        let dots = dots_of(-100.0, 0.0, 100.0, 0.0, vp);
         assert!(!dots.is_empty());
         // Partially outside, diagonal.
-        let dots = dots_of(-50.0, -50.0, 1.0, 1.0, 8, 8, b);
+        let dots = dots_of(-50.0, -50.0, 1.0, 1.0, vp);
         assert!(!dots.is_empty());
     }
 
     #[test]
-    fn get_point_rejects_outside_and_maps_edges() {
-        let b = Bounds::centered(40, 32);
-        assert_eq!(get_point(0.0, 0.0, 40, 32, b), Some((20, 16)));
-        assert_eq!(get_point(-20.0, 16.0, 40, 32, b), Some((0, 0)));
-        assert_eq!(get_point(20.0, -16.0, 40, 32, b), Some((39, 31)));
-        assert_eq!(get_point(-20.1, 0.0, 40, 32, b), None);
-        assert_eq!(get_point(0.0, 16.1, 40, 32, b), None);
+    fn dot_mapping_rejects_outside_and_maps_edges() {
+        let vp = Viewport::centered(40, 32);
+        // The window corners land on dot 0 and the last dot.
+        assert_eq!(vp.dot_x(0.0), Some(20));
+        assert_eq!(vp.dot_y(0.0), Some(16));
+        assert_eq!(vp.dot_x(-20.0), Some(0));
+        assert_eq!(vp.dot_y(16.0), Some(0));
+        assert_eq!(vp.dot_x(20.0), Some(39));
+        assert_eq!(vp.dot_y(-16.0), Some(31));
+        // One step outside the window maps to nothing.
+        assert_eq!(vp.dot_x(-20.1), None);
+        assert_eq!(vp.dot_x(20.1), None);
+        assert_eq!(vp.dot_y(16.1), None);
+        assert_eq!(vp.dot_y(-16.1), None);
+        // Non-finite coordinates map to nothing rather than to dot 0: the
+        // mapping's own `v >= 0.0 && v <= last` test fails on NaN, which is
+        // what keeps a NaN projection from lighting the top-left corner.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, 1e300] {
+            assert_eq!(vp.dot_x(bad), None, "dot_x({bad})");
+            assert_eq!(vp.dot_y(bad), None, "dot_y({bad})");
+        }
+        // The same must hold for a whole line built from non-finite input.
+        assert!(dots_of(f64::NAN, 0.0, 0.0, 0.0, vp).is_empty());
+        assert!(dots_of(0.0, 0.0, f64::INFINITY, f64::INFINITY, vp).is_empty());
     }
 
     /// Collect the cells `rasterize_camera_line` lights. A scale of 1 makes
@@ -440,9 +579,7 @@ mod tests {
             a,
             b,
             |p| crate::projection::project_camera_point(p, scale),
-            px_w,
-            px_h,
-            Bounds::centered(px_w, px_h),
+            Viewport::centered(px_w, px_h),
             |cell, _| cells.push(cell),
         );
         cells.sort_unstable();
@@ -500,16 +637,9 @@ mod tests {
             let (x1, y1) = project(a);
             let (x2, y2) = project(b);
             let mut cells = Vec::new();
-            rasterize_line(
-                x1,
-                y1,
-                x2,
-                y2,
-                px_w,
-                px_h,
-                Bounds::centered(px_w, px_h),
-                |cell, _| cells.push(cell),
-            );
+            rasterize_line(x1, y1, x2, y2, Viewport::centered(px_w, px_h), |cell, _| {
+                cells.push(cell)
+            });
             cells.sort_unstable();
             cells.dedup();
             cells

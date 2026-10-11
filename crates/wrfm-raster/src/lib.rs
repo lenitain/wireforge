@@ -18,29 +18,21 @@
 //! ```
 //! use wrfm_raster::geometry::world_rot;
 //! use wrfm_raster::projection::{focal, Camera};
-//! use wrfm_raster::raster::{dots_to_lines, rasterize_line, Bounds};
+//! use wrfm_raster::raster::{dots_to_lines, rasterize_line, Viewport};
 //!
-//! // A 20x8-cell canvas (40x32 dots).
+//! // A 20x8-cell canvas (40x32 dots). Build the viewport ONCE and reuse
+//! // it for every line: it carries the grid and the window together.
 //! let (cw, ch) = (20usize, 8usize);
-//! let (px_w, px_h) = (cw * 2, ch * 4);
+//! let vp = Viewport::centered(cw * 2, ch * 4);
 //!
 //! let cam = Camera::new(world_rot(0.0, 0.0), 8.0, 0.0, 0.0, 0.0);
-//! let f = focal(px_h as f64);
-//! let mut dots = vec![0u8; cw * ch];
+//! let f = focal(vp.px_h() as f64);
+//! let mut dots = vec![0u8; vp.cells()];
 //!
 //! // A line from (-10, -5) to (10, 5) in canvas coordinates.
 //! let (p1, p2) = (cam.project((-10.0, -5.0, 0.0), f), cam.project((10.0, 5.0, 0.0), f));
 //! if let (Some(a), Some(b)) = (p1, p2) {
-//!     rasterize_line(
-//!         a.0,
-//!         a.1,
-//!         b.0,
-//!         b.1,
-//!         px_w,
-//!         px_h,
-//!         Bounds::centered(px_w, px_h),
-//!         |cell, bit| dots[cell] |= bit,
-//!     );
+//!     rasterize_line(a.0, a.1, b.0, b.1, vp, |cell, bit| dots[cell] |= bit);
 //! }
 //!
 //! let lines = dots_to_lines(&dots, cw, ch);

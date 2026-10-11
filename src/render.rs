@@ -5,7 +5,7 @@ use wrfm_raster::Model;
 use crate::view::{self, ViewState};
 use wrfm_raster::projection::focal;
 use wrfm_raster::projection::project_camera_point;
-use wrfm_raster::raster::{Bounds, clip_near, rasterize_camera_line};
+use wrfm_raster::raster::{Viewport, clip_near, rasterize_camera_line};
 
 /// An empty cell: a space in the terminal's own colors, on its own background.
 const SPACE: u64 = (' ' as u64) << 16;
@@ -440,6 +440,11 @@ impl Rasterizer {
         debug_assert!(cw > 0 && ch > 0);
         let px_w = cw * 2;
         let px_h = ch * 4;
+        // The grid and the window it maps through, derived ONCE per frame.
+        // The window is the same centered box on every frame (`project`
+        // caches the projection against it), so this is the only place it
+        // is built — the per-edge call sites just copy the viewport.
+        let vp = Viewport::centered(px_w, px_h);
         self.project(model, view, px_w, px_h);
 
         self.dots.fill(0);
@@ -455,9 +460,7 @@ impl Rasterizer {
                 &self.proj_cam,
                 &self.proj_ok,
                 focal(px_h as f64),
-                self.cw,
-                px_w,
-                px_h,
+                vp,
                 cyan,
             );
             self.dots = dots;
@@ -474,9 +477,7 @@ impl Rasterizer {
                     self.proj_ok[b],
                     cyan,
                     focal(px_h as f64),
-                    self.cw,
-                    px_w,
-                    px_h,
+                    vp,
                     &mut self.dots,
                     &mut self.colors,
                 );
@@ -517,9 +518,7 @@ impl Rasterizer {
                     end_ok,
                     color,
                     scale,
-                    self.cw,
-                    px_w,
-                    px_h,
+                    vp,
                     &mut self.dots,
                     &mut self.colors,
                 );
@@ -636,13 +635,16 @@ fn paint_segment_into(
     b_ok: bool,
     color: u8,
     scale: f64,
-    cw: usize,
-    px_w: usize,
-    px_h: usize,
+    vp: Viewport,
     dots: &mut [u8],
     colors: &mut [u8],
 ) {
-    debug_assert_eq!(cw * 2, px_w, "dot width must be 2 per character cell");
+    debug_assert_eq!(
+        dots.len(),
+        vp.cells(),
+        "dot buffer must cover the viewport's cells"
+    );
+    debug_assert_eq!(colors.len(), dots.len());
     debug_assert!(
         a_ok || b_ok,
         "an edge with both endpoints behind the camera plane draws nothing"
@@ -651,9 +653,7 @@ fn paint_segment_into(
         a,
         b,
         |p| project_camera_point(p, scale),
-        px_w,
-        px_h,
-        Bounds::centered(px_w, px_h),
+        vp,
         |cell, bit| {
             dots[cell] |= bit;
             colors[cell] = color;
@@ -668,13 +668,11 @@ fn rasterize_edges_par(
     cam: &[[f64; 3]],
     ok: &[bool],
     scale: f64,
-    cw: usize,
-    px_w: usize,
-    px_h: usize,
+    vp: Viewport,
     color: u8,
 ) -> (Vec<u8>, Vec<u8>) {
     use rayon::prelude::*;
-    let cells = cw * (px_h / 4);
+    let cells = vp.cells();
     let n_edges = edges.len();
     let chunk_size = n_edges.div_ceil(rayon::current_num_threads() * 4).max(1);
     edges
@@ -685,8 +683,7 @@ fn rasterize_edges_par(
                 for &(a, b) in chunk {
                     if ok[a] || ok[b] {
                         paint_segment_into(
-                            cam[a], ok[a], cam[b], ok[b], color, scale, cw, px_w, px_h, &mut pat,
-                            &mut col,
+                            cam[a], ok[a], cam[b], ok[b], color, scale, vp, &mut pat, &mut col,
                         );
                     }
                 }

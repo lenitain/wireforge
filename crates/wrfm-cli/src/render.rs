@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use wrfm_raster::Model;
 use wrfm_raster::geometry::{auto_dist, bounds, world_rot};
 use wrfm_raster::projection::{Camera, focal, project_camera_point};
-use wrfm_raster::raster::{Bounds, dots_to_lines, rasterize_camera_line};
+use wrfm_raster::raster::{Viewport, dots_to_lines, rasterize_camera_line};
 
 /// Camera distance used when `auto_dist=false` — the fork's default distance (no auto camera distance).
 pub const DEFAULT_DIST: f64 = 8.0;
@@ -421,10 +421,9 @@ fn render_braille(m: &Model, g: &GeomParams) -> Vec<String> {
     // dimension still allocates one cell (the same `max(1)` area ratatui
     // derives), while the zero-size WINDOW maps nothing — blank frame.
     let (cw, ch) = (w.max(1) as usize, h.max(1) as usize);
-    let (dots_w, dots_h) = (cw * 2, ch * 4);
-    let win = Bounds::from_arrays(x_bounds, y_bounds);
+    let vp = Viewport::from_arrays(cw * 2, ch * 4, x_bounds, y_bounds);
 
-    let mut dots = vec![0u8; cw * ch];
+    let mut dots = vec![0u8; vp.cells()];
     for &(a, b) in &m.edges {
         // Clip the edge at the camera's near plane instead of dropping it
         // when one endpoint is culled: the part in front of the plane is
@@ -435,9 +434,7 @@ fn render_braille(m: &Model, g: &GeomParams) -> Vec<String> {
             cam.camera_space(m.vertices[a]),
             cam.camera_space(m.vertices[b]),
             |p| project_camera_point(p, f),
-            dots_w,
-            dots_h,
-            win,
+            vp,
             |cell, bit| dots[cell] |= bit,
         );
     }

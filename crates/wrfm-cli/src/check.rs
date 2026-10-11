@@ -98,6 +98,71 @@ pub fn degrees(m: &Model) -> Vec<usize> {
     deg
 }
 
+/// Up to two incident EDGE INDICES per vertex, in one pass over the edges.
+///
+/// This is the lookup `redundant_vertices` needs: the old form walked the whole
+/// edge list once per degree-2 vertex to find its neighbours, which is O(V x E)
+/// and quadratic on the shapes that are almost entirely interior vertices — a
+/// 90k-vertex chain spent ~11 s deciding a verdict. `first`/`second` are what
+/// replaced that scan.
+fn incident_edges(m: &Model) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
+    let n = m.vertices.len();
+    let mut first: Vec<Option<usize>> = vec![None; n];
+    let mut second: Vec<Option<usize>> = vec![None; n];
+    for (ei, &(a, b)) in m.edges.iter().enumerate() {
+        for v in [a, b] {
+            if let Some(slot) = first.get_mut(v)
+                && slot.is_none()
+            {
+                *slot = Some(ei);
+                continue;
+            }
+            if let Some(slot) = second.get_mut(v)
+                && slot.is_none()
+            {
+                *slot = Some(ei);
+            }
+        }
+    }
+    (first, second)
+}
+
+/// Degree table AND the incident-edge pairs from ONE pass.
+///
+/// `degrees` is kept as the authority on what a degree IS (see its callers);
+/// this derives the identical table from the same walk that fills the pairs, so
+/// `check` does not traverse the edge list twice.
+fn degrees_and_incident(m: &Model) -> (Vec<usize>, Vec<Option<usize>>, Vec<Option<usize>>) {
+    let n = m.vertices.len();
+    let mut deg = vec![0usize; n];
+    let mut first: Vec<Option<usize>> = vec![None; n];
+    let mut second: Vec<Option<usize>> = vec![None; n];
+    for (ei, &(a, b)) in m.edges.iter().enumerate() {
+        // Degree: both endpoints count, and `a == b` counts twice — exactly
+        // what `degrees` does.
+        if let Some(x) = deg.get_mut(a) {
+            *x += 1;
+        }
+        if let Some(y) = deg.get_mut(b) {
+            *y += 1;
+        }
+        for v in [a, b] {
+            if let Some(slot) = first.get_mut(v)
+                && slot.is_none()
+            {
+                *slot = Some(ei);
+                continue;
+            }
+            if let Some(slot) = second.get_mut(v)
+                && slot.is_none()
+            {
+                *slot = Some(ei);
+            }
+        }
+    }
+    (deg, first, second)
+}
+
 /// A degree-2 vertex that lies within the point-identity tolerance of the
 /// straight chord between its two neighbours is REDUNDANT: the wire passes
 /// straight through it, so it is a degenerate (pinch) midpoint that carries
@@ -106,9 +171,12 @@ pub fn degrees(m: &Model) -> Vec<usize> {
 /// a corner is healthy and is NOT reported; that distinction is the whole
 /// difference from the old blanket "every degree 2 is non-manifold" rule.
 pub fn redundant_vertices(m: &Model, deg: &[usize]) -> Vec<usize> {
-    deg.iter()
+    let (first, second) = incident_edges(m);
+    m.vertices
+        .iter()
         .enumerate()
-        .filter(|&(i, &d)| d == 2 && is_redundant_midpoint(m, i))
+        .filter(|&(i, _)| deg.get(i).copied().unwrap_or(0) == 2)
+        .filter(|&(i, _)| is_redundant_midpoint(m, i, first[i], second[i]))
         .map(|(i, _)| i)
         .collect()
 }
@@ -117,28 +185,18 @@ pub fn redundant_vertices(m: &Model, deg: &[usize]) -> Vec<usize> {
 /// Shapes that leave fewer than two distinct neighbours (self-loops,
 /// duplicated edges — both broken verdicts caught elsewhere) are never
 /// redundant, and a corrupt out-of-range neighbour can never panic.
-fn is_redundant_midpoint(m: &Model, i: usize) -> bool {
-    let mut first: Option<usize> = None;
-    let mut second: Option<usize> = None;
-    for &(a, b) in &m.edges {
-        let other = if a == i {
-            b
-        } else if b == i {
-            a
-        } else {
-            continue;
-        };
-        if first.is_none() {
-            first = Some(other);
-        } else if second.is_none() {
-            second = Some(other);
-        } else {
-            return false; // more than two incident edges
-        }
-    }
-    let (Some(n1), Some(n2)) = (first, second) else {
+///
+/// `e1`/`e2` are two incident edge indices from [`incident_edges`]; taking them
+/// as arguments is what keeps this O(1) instead of a scan of the whole edge
+/// list.
+fn is_redundant_midpoint(m: &Model, i: usize, e1: Option<usize>, e2: Option<usize>) -> bool {
+    let (Some(e1), Some(e2)) = (e1, e2) else {
         return false;
     };
+    let other = |(a, b): (usize, usize)| if a == i { b } else { a };
+    // A self-loop incident to `i` reports `i` as its other end, so it is
+    // rejected below along with any duplicated neighbour.
+    let (n1, n2) = (other(m.edges[e1]), other(m.edges[e2]));
     if n1 == n2 || n1 == i || n2 == i {
         return false;
     }
@@ -166,8 +224,126 @@ fn point_segment_distance(p: (f64, f64, f64), a: (f64, f64, f64), b: (f64, f64, 
     ((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2) + (p.2 - q.2).powi(2)).sqrt()
 }
 
-/// Run the health check. `strict` upgrades the warning-level issues (duplicate vertices, dangling and redundant vertices) to `broken`.
+/// What the health check found, as lists for the report plus the counts the
+/// verdict is computed from.
+///
+/// The lists exist only for `wrfm check`'s output; `with_issues = false` skips
+/// building them (and the near-duplicate scan, which is the one check with no
+/// cheap form) so a caller that wants nothing but the exit code does not pay
+/// for JSON it will throw away.
+struct Findings {
+    vertices: usize,
+    edges: usize,
+    /// How many of each category were found. The verdict reads THESE, so it is
+    /// the same answer whether or not the lists below were built — detection
+    /// always runs, only the JSON is optional.
+    n_duplicate_vertices: usize,
+    n_near_duplicate_vertices: usize,
+    n_zero_length_edges: usize,
+    n_duplicate_edges: usize,
+    n_dangling_edges: usize,
+    n_isolated_vertices: usize,
+    n_redundant_vertices: usize,
+    duplicate_vertices: Vec<Value>,
+    near_duplicate_vertices: Vec<Value>,
+    zero_length_edges: Vec<Value>,
+    duplicate_edges: Vec<Value>,
+    dangling_edges: Vec<Value>,
+    isolated_vertices: Vec<Value>,
+    redundant_vertices: Vec<Value>,
+}
+
+impl Findings {
+    /// The verdict rule. It reads counts, never the JSON bodies, so it is the
+    /// same answer whether or not the lists were built.
+    fn verdict(&self, strict: bool) -> &'static str {
+        let broken = self.n_zero_length_edges > 0
+            || self.n_duplicate_edges > 0
+            || self.n_isolated_vertices > 0;
+        let warn = self.n_duplicate_vertices > 0
+            || self.n_near_duplicate_vertices > 0
+            || self.n_dangling_edges > 0
+            || self.n_redundant_vertices > 0;
+        if broken || (warn && strict) {
+            "broken"
+        } else if warn {
+            "warn"
+        } else {
+            "ok"
+        }
+    }
+
+    fn issue_count(&self) -> usize {
+        self.n_duplicate_vertices
+            + self.n_near_duplicate_vertices
+            + self.n_zero_length_edges
+            + self.n_duplicate_edges
+            + self.n_dangling_edges
+            + self.n_isolated_vertices
+            + self.n_redundant_vertices
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "{} issue(s): {} duplicate vertices, {} near-duplicate vertices, {} zero-length edges, {} duplicate edges, {} dangling edges, {} isolated vertices, {} redundant vertices",
+            self.issue_count(),
+            self.n_duplicate_vertices,
+            self.n_near_duplicate_vertices,
+            self.n_zero_length_edges,
+            self.n_duplicate_edges,
+            self.n_dangling_edges,
+            self.n_isolated_vertices,
+            self.n_redundant_vertices
+        )
+    }
+}
+
+/// Run the health check and BUILD THE REPORT. `strict` upgrades the
+/// warning-level issues (duplicate vertices, dangling and redundant vertices)
+/// to `broken`. Call [`check_verdict`] instead when only the exit code matters:
+/// this one also computes the informational `quality` block, which is the
+/// expensive part (it runs the bridge walk and indexes every edge).
 pub fn check(m: &Model, strict: bool) -> Value {
+    let f = findings(m, true);
+    let verdict = f.verdict(strict);
+    let summary = f.summary();
+    let quality = quality_of(m);
+    json!({
+        // No "parseable" field: any file reaching wrfm_check already passed the
+        // L1 load gate — syntax errors fail at load, so the answer is always
+        // "true" by construction.
+        "vertices": f.vertices,
+        "edges": f.edges,
+        "issues": {
+            "duplicate_vertices": f.duplicate_vertices,
+            "near_duplicate_vertices": f.near_duplicate_vertices,
+            "zero_length_edges": f.zero_length_edges,
+            "duplicate_edges": f.duplicate_edges,
+            "dangling_edges": f.dangling_edges,
+            "isolated_vertices": f.isolated_vertices,
+            "redundant_vertices": f.redundant_vertices,
+        },
+        "tolerance": POINT_TOL,
+        "quality": quality,
+        "verdict": verdict,
+        "summary": summary,
+    })
+}
+
+/// The verdict alone, without the report.
+///
+/// Every data command reports the model's health on its EXIT CODE, so all of
+/// them need this answer; only `wrfm check` needs the report. Skipping the
+/// report also skips `quality_of`, which is where the bridge walk lives — so a
+/// command like `render` no longer pays for a global bridge analysis it never
+/// looks at.
+pub fn check_verdict(m: &Model, strict: bool) -> &'static str {
+    findings(m, false).verdict(strict)
+}
+
+/// Detect every issue category. See [`Findings`] for why the lists are
+/// optional. The detection itself is the same either way.
+fn findings(m: &Model, with_issues: bool) -> Findings {
     let n = m.vertices.len();
 
     // Degree table (needed by several checks) — built by the shared `degrees`
@@ -175,7 +351,7 @@ pub fn check(m: &Model, strict: bool) -> Value {
     // All edge indices are valid (see the module-level invariant). An EMPTY
     // model keeps its historical one-slot table, so the scan below still
     // reports it `broken` (isolated vertex) instead of silently `ok`.
-    let mut deg = degrees(m);
+    let (mut deg, first_incident, _second_incident) = degrees_and_incident(m);
     if n == 0 {
         deg.push(0);
     }
@@ -195,29 +371,40 @@ pub fn check(m: &Model, strict: bool) -> Value {
     // `check_finds_near_duplicates_across_a_cell_boundary`).
     let mut dup_vertices: Vec<Value> = Vec::new();
     let mut near_vertices: Vec<Value> = Vec::new();
+    let (mut n_dup_vertices, mut n_near_vertices) = (0usize, 0usize);
     {
         let mut exact: HashMap<(u64, u64, u64), usize> = HashMap::new();
         let mut grid = Grid::new(POINT_TOL);
         for (i, &v) in m.vertices.iter().enumerate() {
             let bits = (v.0.to_bits(), v.1.to_bits(), v.2.to_bits());
             if let Some(&twin) = exact.get(&bits) {
-                dup_vertices.push(json!({
-                                "index": i,
-                                "coords": [v.0, v.1, v.2],
-                                "twin": twin,
-                }));
+                n_dup_vertices += 1;
+                if with_issues {
+                    dup_vertices.push(json!({
+                                    "index": i,
+                                    "coords": [v.0, v.1, v.2],
+                                    "twin": twin,
+                    }));
+                }
             } else {
                 exact.insert(bits, i);
+                // Detection, ALWAYS: a near-duplicate is a `warn`, and the warn
+                // travels on the exit code. Skipping it here made `wrfm edit
+                // --dedupe` exit 0 on a model with a 2e-16 twin (caught by
+                // tests/cli.rs). Only the JSON body is optional.
                 if let Some(twin) = grid.nearest_within(v, &m.vertices, POINT_TOL) {
                     let w = m.vertices[twin];
                     let d =
                         ((v.0 - w.0).powi(2) + (v.1 - w.1).powi(2) + (v.2 - w.2).powi(2)).sqrt();
-                    near_vertices.push(json!({
-                                       "index": i,
-                                       "coords": [v.0, v.1, v.2],
-                                       "twin": twin,
-                                       "distance": d,
-                    }));
+                    n_near_vertices += 1;
+                    if with_issues {
+                        near_vertices.push(json!({
+                                           "index": i,
+                                           "coords": [v.0, v.1, v.2],
+                                           "twin": twin,
+                                           "distance": d,
+                        }));
+                    }
                 }
             }
             grid.insert(i, v);
@@ -226,16 +413,24 @@ pub fn check(m: &Model, strict: bool) -> Value {
 
     // Zero-length edges.
     let mut zero_edges: Vec<Value> = Vec::new();
+    let mut n_zero_edges = 0usize;
     // Duplicate edges (unordered pairs).
     let mut edge_count: HashMap<(usize, usize), usize> = HashMap::new();
-    for &(a, b) in &m.edges {
+    // `first_incident` came from `degrees_and_incident` above: it replaces the
+    // dangling pass's rescan of the whole edge list once per degree-1 vertex
+    // (a star graph was quadratic: 30k leaves cost 2.5 s in a command that only
+    // wanted a verdict).
+    for &(a, b) in m.edges.iter() {
         // Edge indices are valid (module-level invariant), so `va`/`vb`
         // exist; the old `a < n && b < n` guard was removed as unreachable: the
         // module-level invariant already guarantees valid edge indices.
         let (va, vb) = (m.vertices[a], m.vertices[b]);
         let d2 = (va.0 - vb.0).powi(2) + (va.1 - vb.1).powi(2) + (va.2 - vb.2).powi(2);
         if d2 < POINT_TOL * POINT_TOL {
-            zero_edges.push(json!({ "edge": [a, b], "distance": d2.sqrt() }));
+            n_zero_edges += 1;
+            if with_issues {
+                zero_edges.push(json!({ "edge": [a, b], "distance": d2.sqrt() }));
+            }
         }
         let key = (a.min(b), a.max(b));
         *edge_count.entry(key).or_insert(0) += 1;
@@ -247,20 +442,27 @@ pub fn check(m: &Model, strict: bool) -> Value {
         .map(|(&(a, b), &c)| (a, b, c))
         .collect();
     counts.sort();
-    for (a, b, c) in counts {
-        dup_edges.push(json!({ "edge": [a, b], "repeats": c }));
+    let n_dup_edges = counts.len();
+    if with_issues {
+        for (a, b, c) in counts {
+            dup_edges.push(json!({ "edge": [a, b], "repeats": c }));
+        }
     }
 
     // Dangling edges (touch a degree-1 vertex) and isolated vertices.
     let mut dangling: Vec<Value> = Vec::new();
     let mut isolated: Vec<usize> = Vec::new();
+    let mut n_dangling = 0usize;
     for (i, &d) in deg.iter().enumerate() {
         if d == 0 {
             isolated.push(i);
         } else if d == 1 {
-            // The (up to two) edges touching this vertex.
-            for (ei, &(a, b)) in m.edges.iter().enumerate() {
-                if a == i || b == i {
+            // A degree-1 vertex has exactly one incident edge; `first_incident`
+            // remembers which without scanning the edge list again.
+            if let Some(ei) = first_incident.get(i).copied().flatten() {
+                n_dangling += 1;
+                if with_issues {
+                    let (a, b) = m.edges[ei];
                     dangling.push(json!({ "edge": [a, b], "vertex": i, "edge_index": ei }));
                 }
             }
@@ -273,64 +475,35 @@ pub fn check(m: &Model, strict: bool) -> Value {
     // Redundant vertices: degree-2 midpoints on the straight chord between
     // their neighbours (see `redundant_vertices`) — pass-throughs, not
     // corners.
-    let redundant: Vec<Value> = redundant_vertices(m, &deg)
-        .into_iter()
-        .map(|i| json!({ "vertex": i, "degree": 2 }))
-        .collect();
-
-    // Verdict.
-    let broken = !zero_edges.is_empty() || !dup_edges.is_empty() || !isolated.is_empty();
-    let warn = !dup_vertices.is_empty()
-        || !near_vertices.is_empty()
-        || !dangling.is_empty()
-        || !redundant.is_empty();
-    let verdict = if broken || (warn && strict) {
-        "broken"
-    } else if warn {
-        "warn"
+    let found_redundant = redundant_vertices(m, &deg);
+    let n_redundant = found_redundant.len();
+    let redundant: Vec<Value> = if with_issues {
+        found_redundant
+            .into_iter()
+            .map(|i| json!({ "vertex": i, "degree": 2 }))
+            .collect()
     } else {
-        "ok"
+        Vec::new()
     };
 
-    let n_issues = dup_vertices.len()
-        + near_vertices.len()
-        + zero_edges.len()
-        + dup_edges.len()
-        + dangling.len()
-        + isolated.len()
-        + redundant.len();
-    let summary = format!(
-        "{n_issues} issue(s): {} duplicate vertices, {} near-duplicate vertices, {} zero-length edges, {} duplicate edges, {} dangling edges, {} isolated vertices, {} redundant vertices",
-        dup_vertices.len(),
-        near_vertices.len(),
-        zero_edges.len(),
-        dup_edges.len(),
-        dangling.len(),
-        isolated.len(),
-        redundant.len()
-    );
-
-    let quality = quality_of(m);
-    json!({
-    // No "parseable" field: any file reaching
-    // wrfm_check already passed the L1 load gate — syntax errors fail
-           // at load, so the answer is always "true" by construction.
-           "vertices": n,
-           "edges": m.edges.len(),
-           "issues": {
-               "duplicate_vertices": dup_vertices,
-               "near_duplicate_vertices": near_vertices,
-               "zero_length_edges": zero_edges,
-               "duplicate_edges": dup_edges,
-               "dangling_edges": dangling,
-               "isolated_vertices": isolated_json,
-               "redundant_vertices": redundant,
-    },
-           "tolerance": POINT_TOL,
-           "quality": quality,
-           "verdict": verdict,
-           "summary": summary,
-    })
+    Findings {
+        vertices: n,
+        edges: m.edges.len(),
+        n_duplicate_vertices: n_dup_vertices,
+        n_near_duplicate_vertices: n_near_vertices,
+        n_zero_length_edges: n_zero_edges,
+        n_duplicate_edges: n_dup_edges,
+        n_dangling_edges: n_dangling,
+        n_isolated_vertices: isolated.len(),
+        n_redundant_vertices: n_redundant,
+        duplicate_vertices: dup_vertices,
+        near_duplicate_vertices: near_vertices,
+        zero_length_edges: zero_edges,
+        duplicate_edges: dup_edges,
+        dangling_edges: dangling,
+        isolated_vertices: isolated_json,
+        redundant_vertices: redundant,
+    }
 }
 
 /// Informational quality diagnostics (open edges / proportion / orientation).
@@ -357,21 +530,36 @@ fn quality_of(m: &Model) -> Value {
     ];
 
     // Open edges = bridges, mapped back to their original edge indices.
-    let open_edges: Vec<Value> = bridges(m)
-        .iter()
-        .flat_map(|&(a, b)| {
-            m.edges
-                .iter()
-                .enumerate()
-                .filter_map(move |(ei, &(ea, eb))| {
-                    if (ea == a && eb == b) || (ea == b && eb == a) {
-                        Some(json!({ "edge": [a, b], "edge_index": ei }))
-                    } else {
-                        None
-                    }
+    //
+    // The index is built ONCE and probed per bridge. The obvious form — for
+    // each bridge, walk the edge list looking for the pair — is O(E x bridges),
+    // and a bridge-heavy model makes that quadratic for real: a 90k-vertex
+    // chain (~90k bridges over 90k edges) spent 24 s resolving indices for a
+    // command that only wanted its verdict. First occurrence wins, which is
+    // what the scanning form reported too (its `flat_map` emitted every match,
+    // but a simple graph has one).
+    //
+    // No bridges short-circuits: the index would otherwise cost more than the
+    // scan it replaces, since a closed model gives the scan no work to do.
+    let open_edges: Vec<Value> = {
+        let br = bridges(m);
+        if br.is_empty() {
+            Vec::new()
+        } else {
+            let mut edge_index: HashMap<(usize, usize), usize> =
+                HashMap::with_capacity(m.edges.len());
+            for (ei, &(a, b)) in m.edges.iter().enumerate() {
+                edge_index.entry((a.min(b), a.max(b))).or_insert(ei);
+            }
+            br.iter()
+                .filter_map(|&(a, b)| {
+                    edge_index
+                        .get(&(a.min(b), a.max(b)))
+                        .map(|&ei| json!({ "edge": [a, b], "edge_index": ei }))
                 })
-        })
-        .collect();
+                .collect()
+        }
+    };
 
     let mut quality = json!({
         "open_edges": open_edges,
@@ -842,5 +1030,202 @@ mod tests {
         edges.extend([(n, n + 1), (n + 1, n + 2), (n + 2, n)]);
         let m = Model { vertices, edges };
         assert_eq!(bridges(&m).len(), n - 1);
+    }
+
+    /// Redundant-vertex detection must be the same on a shape with MANY
+    /// degree-2 vertices as on a small one. The old form rescanned every edge
+    /// once per degree-2 vertex, so a 90k chain (every interior vertex is a
+    /// straight pass-through) spent ~11 s in a command that only wanted a
+    /// verdict.
+    #[test]
+    fn redundant_detection_is_shape_independent() {
+        // A chain: every interior vertex is a collinear pass-through.
+        let n = 20_000usize;
+        let chain = Model {
+            vertices: (0..n).map(|i| (i as f64, 0.0, 0.0)).collect(),
+            edges: (0..n - 1).map(|i| (i, i + 1)).collect(),
+        };
+        let deg = degrees(&chain);
+        let red = redundant_vertices(&chain, &deg);
+        assert_eq!(
+            red.len(),
+            n - 2,
+            "every interior vertex of a chain is redundant"
+        );
+        assert_eq!(red[0], 1);
+        assert_eq!(*red.last().unwrap(), n - 2);
+
+        // A chain that TURNS a corner at the middle: that vertex is not a
+        // pass-through, and neither are the ends.
+        let half = n / 2;
+        let bent = Model {
+            vertices: (0..n)
+                .map(|i| {
+                    if i <= half {
+                        (i as f64, 0.0, 0.0)
+                    } else {
+                        (half as f64, (i - half) as f64, 0.0)
+                    }
+                })
+                .collect(),
+            edges: (0..n - 1).map(|i| (i, i + 1)).collect(),
+        };
+        let deg = degrees(&bent);
+        let red = redundant_vertices(&bent, &deg);
+        assert!(!red.contains(&half), "the corner is not a pass-through");
+        assert_eq!(red.len(), n - 3, "only the corner is excluded");
+    }
+
+    /// Parallel edges and self-loops leave a vertex without two DISTINCT
+    /// neighbours, so they are never redundant — and the cheap neighbour lookup
+    /// must not mistake one edge for two.
+    #[test]
+    fn redundant_excludes_shapes_without_two_distinct_neighbours() {
+        // Two vertices joined twice: each has degree 2 but only one neighbour.
+        let doubled = Model {
+            vertices: vec![(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+            edges: vec![(0, 1), (0, 1)],
+        };
+        let deg = degrees(&doubled);
+        assert!(redundant_vertices(&doubled, &deg).is_empty());
+
+        // A self-loop plus one real edge: the loop's two "incidences" are the
+        // same vertex.
+        let looped = Model {
+            vertices: vec![(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+            edges: vec![(0, 0), (0, 1)],
+        };
+        let deg = degrees(&looped);
+        assert!(redundant_vertices(&looped, &deg).is_empty());
+    }
+
+    /// A model per HEALTH OUTCOME, so the cheap entry point is compared against
+    /// the full report on every branch of the verdict rule rather than on one
+    /// lucky input.
+    fn verdict_fixtures() -> Vec<(&'static str, Model)> {
+        vec![
+            ("cube", cube()),
+            ("empty", Model::default()),
+            ("duplicate vertex", {
+                let mut m = cube();
+                m.vertices.push((1.0, 1.0, 1.0));
+                m.edges.push((8, 0));
+                m
+            }),
+            ("zero-length edge", {
+                let mut m = cube();
+                m.vertices.push((0.0, 0.0, 0.0));
+                m.edges.push((8, 8));
+                m
+            }),
+            ("isolated vertex", {
+                let mut m = cube();
+                m.vertices.push((9.0, 9.0, 9.0));
+                m
+            }),
+            ("dangling edge", {
+                let mut m = cube();
+                m.vertices.push((5.0, 5.0, 5.0));
+                m.edges.push((0, 8));
+                m
+            }),
+            // The warn branch that --strict upgrades to broken.
+            ("redundant midpoint", {
+                let mut m = cube();
+                let base = m.vertices.len();
+                m.vertices.push((0.0, 0.0, 0.0));
+                m.vertices.push((2.0, 0.0, 0.0));
+                m.edges.push((base, base + 1));
+                m
+            }),
+        ]
+    }
+
+    /// `check_verdict` must answer exactly what `check` answers, on every model
+    /// and under both `strict` settings — it is the same rule, reached without
+    /// building the JSON report.
+    #[test]
+    fn check_verdict_agrees_with_the_full_report() {
+        for (name, m) in verdict_fixtures() {
+            for strict in [false, true] {
+                assert_eq!(
+                    check_verdict(&m, strict),
+                    check(&m, strict)["verdict"].as_str().unwrap(),
+                    "{name} (strict={strict}): the cheap path disagrees with the report"
+                );
+            }
+        }
+        // ...and every branch actually occurred, so the loop above cannot pass
+        // by all fixtures landing in the same arm.
+        let seen: Vec<&str> = verdict_fixtures()
+            .iter()
+            .map(|(_, m)| check_verdict(m, false))
+            .collect();
+        for want in ["ok", "warn", "broken"] {
+            assert!(seen.contains(&want), "no fixture produced verdict {want}");
+        }
+    }
+
+    /// A report verdict of `ok` is the claim that EVERY category was empty, so
+    /// check it against the arrays the report prints.
+    #[test]
+    fn an_ok_verdict_means_every_issue_category_is_empty() {
+        const CATEGORIES: [&str; 7] = [
+            "duplicate_vertices",
+            "near_duplicate_vertices",
+            "zero_length_edges",
+            "duplicate_edges",
+            "dangling_edges",
+            "isolated_vertices",
+            "redundant_vertices",
+        ];
+        for (name, m) in verdict_fixtures() {
+            let r = check(&m, false);
+            for key in CATEGORIES {
+                assert!(r["issues"][key].is_array(), "{name}: {key} missing");
+            }
+            if r["verdict"] == "ok" {
+                for key in CATEGORIES {
+                    assert_eq!(
+                        r["issues"][key].as_array().unwrap().len(),
+                        0,
+                        "{name}: verdict ok but {key} is not empty"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The dangling/isolated split must not depend on how MANY degree-1
+    /// vertices there are: the old form rescanned every edge once per degree-1
+    /// vertex, so a star graph was quadratic. Both shapes pin the count.
+    #[test]
+    fn dangling_detection_is_shape_independent() {
+        // A star: one hub, many leaves. Every leaf is degree-1 -> dangling.
+        let n = 5_000usize;
+        let mut vertices = vec![(0.0, 0.0, 0.0)];
+        let mut edges = Vec::new();
+        for i in 1..=n {
+            vertices.push((i as f64, 0.0, 0.0));
+            edges.push((0, i));
+        }
+        let star = Model { vertices, edges };
+        let r = check(&star, false);
+        assert_eq!(r["issues"]["dangling_edges"].as_array().unwrap().len(), n);
+        assert_eq!(
+            r["issues"]["isolated_vertices"].as_array().unwrap().len(),
+            0
+        );
+        assert_eq!(r["verdict"], "warn"); // dangling only warns, never breaks
+        assert_eq!(check_verdict(&star, false), "warn");
+
+        // A plain chain: exactly TWO degree-1 ends -> exactly two dangling.
+        let n = 1_000usize;
+        let chain = Model {
+            vertices: (0..n).map(|i| (i as f64, 0.0, 0.0)).collect(),
+            edges: (0..n - 1).map(|i| (i, i + 1)).collect(),
+        };
+        let rc = check(&chain, false);
+        assert_eq!(rc["issues"]["dangling_edges"].as_array().unwrap().len(), 2);
     }
 }

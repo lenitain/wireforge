@@ -1009,8 +1009,7 @@ fn cmd_info(file: &str, group: Option<&str>) -> i32 {
         }
         None => loaded.model.clone(),
     };
-    let c = check::check(&model, false);
-    let verdict = verdict_of(&c);
+    let verdict = check::check_verdict(&model, false);
     let (min, max) = wrfm_raster::geometry::bounds(&model);
     let center = [
         (min[0] + max[0]) / 2.0,
@@ -1051,8 +1050,7 @@ fn cmd_group(file: &str, name: Option<&str>) -> i32 {
         Ok(l) => l,
         Err(code) => return code,
     };
-    let c = check::check(&loaded.model, false);
-    let verdict = verdict_of(&c);
+    let verdict = check::check_verdict(&loaded.model, false);
     // Selected group POSITIONS in the full group list (resolve_group returns
     // a reference into `loaded.groups`, so identity locates it exactly even
     // with duplicate names — first match wins, consistent with the rest).
@@ -1095,8 +1093,7 @@ fn cmd_geometry(file: &str, full: bool, group: Option<&str>) -> i32 {
         }
         None => loaded.model.clone(),
     };
-    let c = check::check(&model, false);
-    let verdict = verdict_of(&c);
+    let verdict = check::check_verdict(&model, false);
     let g = if full {
         geometry::analyze_full(&model)
     } else {
@@ -1122,8 +1119,7 @@ fn cmd_query(
         Ok(l) => l,
         Err(code) => return code,
     };
-    let c = check::check(&loaded.model, false);
-    let verdict = verdict_of(&c);
+    let verdict = check::check_verdict(&loaded.model, false);
     let q = match query::Query::parse(query) {
         Ok(q) => q,
         Err(e) => return usage(&e),
@@ -1206,8 +1202,7 @@ fn cmd_view(
         Ok(l) => l,
         Err(code) => return code,
     };
-    let c = check::check(&loaded.model, false);
-    let verdict = verdict_of(&c);
+    let verdict = check::check_verdict(&loaded.model, false);
     let model = match group {
         Some(want) => {
             let g = match resolve_group(&loaded.groups, want, &loaded.source) {
@@ -1262,8 +1257,7 @@ fn cmd_render(
         Ok(l) => l,
         Err(code) => return code,
     };
-    let c = check::check(&loaded.model, false);
-    let verdict = verdict_of(&c);
+    let verdict = check::check_verdict(&loaded.model, false);
     let opts = match render_opts(
         views, format, width, height, grid_w, grid_h, region, fit, auto_dist, dist, pan_x, pan_y,
         pitch, yaw, roll,
@@ -1435,8 +1429,7 @@ fn cmd_transform(
         },
     };
     let out_model = transform::apply(&loaded.model, &t);
-    let c = check::check(&out_model, false);
-    let verdict = verdict_of(&c);
+    let verdict = check::check_verdict(&out_model, false);
     out!(
         "{}",
         load::serialize_model(&out_model, &loaded.name, &loaded.groups, loaded.version)
@@ -1577,8 +1570,7 @@ fn cmd_edit(
             (out, groups, loaded.name.clone())
         }
     };
-    let c = check::check(&out_model, false);
-    let verdict = verdict_of(&c);
+    let verdict = check::check_verdict(&out_model, false);
     out!(
         "{}",
         load::serialize_model(&out_model, &name, &new_groups, loaded.version)
@@ -1647,8 +1639,7 @@ fn cmd_convert(file: &str) -> i32 {
         vertices: model.vertices,
         edges: model.edges,
     };
-    let c = check::check(&rw, false);
-    let verdict = verdict_of(&c);
+    let verdict = check::check_verdict(&rw, false);
     out!(
         "{}",
         load::serialize_model(&rw, &model.name, &model.groups, model.version)

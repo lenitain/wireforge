@@ -302,14 +302,22 @@ pub struct Rasterizer {
     colors: Vec<u8>,
     /// braille pattern -> char lookup (U+2800 + pattern)
     braille: [char; 256],
-    /// cached projected screen points per vertex
+    /// Cached projected screen points per vertex, indexed like `Model::vertices`.
+    ///
+    /// Kept across frames and re-filled in place: only a change in vertex count
+    /// resizes it (see [`Rasterizer::project`]). Every slot is rewritten on
+    /// every projection, so a slot is never read while holding an earlier
+    /// frame's value.
     proj: Vec<[f64; 2]>,
-    /// cached f32 projections (large-model path)
-    proj32: Vec<[f32; 2]>,
-    /// per-vertex "in front of the camera" flags
+    /// Per-vertex "in front of the camera" flags. Written for every vertex on
+    /// every projection.
     proj_ok: Vec<bool>,
-    /// per-vertex camera-space point `[x, y, z]` (z = depth, `<= NEAR`
-    /// behind the camera), for near-plane clipping the segments
+    /// Per-vertex camera-space point `[x, y, z]` (z = depth, `<= NEAR`
+    /// behind the camera), for near-plane clipping the segments.
+    ///
+    /// Written for every vertex too, culled ones included: the clipper needs
+    /// both ends of an edge that straddles the plane, and `proj_ok` alone
+    /// would not tell it which of the two points to trust.
     proj_cam: Vec<[f64; 3]>,
     /// Resident scratch grids for the parallel rasterization path, one
     /// `(patterns, colors)` pair per shard, kept across frames.
@@ -347,7 +355,6 @@ impl Rasterizer {
             dots: Vec::new(),
             colors: Vec::new(),
             proj: Vec::new(),
-            proj32: Vec::new(),
             proj_ok: Vec::new(),
             proj_cam: Vec::new(),
             par_scratch: Vec::new(),
@@ -387,33 +394,44 @@ impl Rasterizer {
         {
             return;
         }
-        self.proj.clear();
-        self.proj.resize(n, [0.0; 2]);
-        self.proj32.clear();
-        self.proj32.resize(n, [0.0; 2]);
-        self.proj_ok.clear();
-        self.proj_ok.resize(n, false);
-        self.proj_cam.clear();
-        self.proj_cam.resize(n, [0.0; 3]);
+        // Refill only when the length actually changed. `clear()` does not
+        // free the allocation, so `resize()` re-fills every element in place —
+        // measured 0.036 ms per frame at 20k vertices, 1.63 ms at 180k (49% of
+        // the whole pass) that the projection below overwrites immediately.
+        //
+        // Reusing the buffers is safe because both batch paths write all three
+        // slots for every vertex, culled ones included. `proj_cam` in
+        // particular must be written even when a vertex is culled: an edge with
+        // one endpoint in front of the near plane is clipped against it using
+        // BOTH camera-space points, so a culled vertex's stale point from an
+        // earlier frame would move that crossing. Relying on the eager zeroing
+        // to cover for it is exactly the bug this replaces.
+        if self.proj.len() != n {
+            self.proj.clear();
+            self.proj.resize(n, [0.0; 2]);
+        }
+        if self.proj_ok.len() != n {
+            self.proj_ok.clear();
+            self.proj_ok.resize(n, false);
+        }
+        if self.proj_cam.len() != n {
+            self.proj_cam.clear();
+            self.proj_cam.resize(n, [0.0; 3]);
+        }
         if n >= F32_PROJECT_THRESHOLD {
-            view::project_batch_f32(
+            // Large models: project with f32 camera math, but land the result
+            // in the f64 grid and fill the camera-space points in the same
+            // pass. `f32 -> f64` is exact, so this matches the old
+            // project-then-widen shape bit for bit while writing 24n fewer
+            // bytes per frame and keeping the whole pass on rayon.
+            view::project_batch_f32_with_camera_space(
                 &model.vertices,
                 view,
                 px_h,
-                &mut self.proj32,
+                &mut self.proj,
                 &mut self.proj_ok,
+                &mut self.proj_cam,
             );
-            // Widen f32 -> f64 (exact) so the downstream clip/rounding runs
-            // in the same f64 math as the exact path. The camera-space point
-            // stays f64: the clipper interpolates with it, and the f32
-            // screen coordinates would lose the far point of a long segment.
-            let cam = view::camera(view);
-            for i in 0..n {
-                self.proj[i] = [self.proj32[i][0] as f64, self.proj32[i][1] as f64];
-                if self.proj_ok[i] {
-                    self.proj_cam[i] = cam.camera_space(model.vertices[i]);
-                }
-            }
         } else {
             // The camera-space point is what the near-plane clipper needs;
             // the batch keeps the same per-vertex split as `project_batch`,
@@ -1010,6 +1028,186 @@ mod tests {
                 None => assert!(!ok[i], "vertex {i} should be behind camera"),
             }
         }
+    }
+
+    #[test]
+    fn large_model_f32_projection_matches_the_f64_path() {
+        // The f32 branch (> F32_PROJECT_THRESHOLD) had no test: the golden and
+        // parity models are all cube-sized. Pad a cube past the threshold with
+        // a far-away grid so the f32 camera's ~7 digits are not the thing
+        // under test — the *shape* of the pass is (f32 math landed straight in
+        // the f64 grid, camera-space points filled in the same traversal).
+        let pad = F32_PROJECT_THRESHOLD + 64;
+        let base = cube();
+        let n = base.vertices.len() + pad;
+        assert!(n >= F32_PROJECT_THRESHOLD, "must take the f32 branch");
+
+        let mut vertices = base.vertices;
+        for i in 0..pad {
+            let t = i as f64;
+            vertices.push((40.0 + t * 1e-3, 60.0 + t * 2e-3, 80.0 + t * 3e-3));
+        }
+        let large = Model {
+            vertices,
+            edges: base.edges,
+        };
+        // Same vertex count, so the only difference is which branch runs.
+        let exact = Model {
+            vertices: large.vertices.clone(),
+            edges: large.edges.clone(),
+        };
+        assert_eq!(large.vertices.len(), n);
+
+        let mut v = ViewState {
+            dist: 8.0,
+            roll: 0.9,
+            pan_x: 0.5,
+            pan_y: -0.25,
+            ..Default::default()
+        };
+        v.add_yaw(0.7);
+        v.add_pitch(-0.4);
+        let (px_w, px_h) = (400, 200);
+
+        // f32 branch: exactly what `project` dispatches to.
+        let mut f32_out = vec![[0.0; 2]; n];
+        let mut f32_ok = vec![false; n];
+        let mut f32_cam = vec![[0.0; 3]; n];
+        view::project_batch_f32_with_camera_space(
+            &large.vertices,
+            &v,
+            px_h,
+            &mut f32_out,
+            &mut f32_ok,
+            &mut f32_cam,
+        );
+
+        // Reference: the f64 batch, written the way the sub-threshold branch
+        // calls it (same result as the pre-change project-then-widen shape).
+        let mut f64_out = vec![[0.0; 2]; n];
+        let mut f64_ok = vec![false; n];
+        let mut f64_cam = vec![[0.0; 3]; n];
+        view::project_batch_with_camera_space(
+            &exact.vertices,
+            &v,
+            px_h,
+            &mut f64_out,
+            &mut f64_ok,
+            &mut f64_cam,
+        );
+
+        let f = wrfm_raster::projection::CameraF32::focal(px_h as f64) as f64;
+        let _cam = view::camera(&v);
+        let mut worst = 0.0f64;
+        for i in 0..n {
+            assert_eq!(f32_ok[i], f64_ok[i], "cull flag vertex {i}");
+            if !f32_ok[i] {
+                continue;
+            }
+            // Camera-space points are f64 on both paths and must agree to the
+            // bit: they are what the near-plane clipper interpolates.
+            assert_eq!(f32_cam[i], f64_cam[i], "camera-space point {i}");
+
+            let (rx, ry) = (f32_cam[i][0], f32_cam[i][1]);
+            let z = f32_cam[i][2];
+            let (sr, cr) = (v.roll.sin_cos().0, v.roll.sin_cos().1);
+            let (dx, dy) = (rx - v.pan_x, ry - v.pan_y);
+            let want_x = f * (v.pan_x + dx * cr - dy * sr) / z;
+            let want_y = f * (v.pan_y + dx * sr + dy * cr) / z;
+
+            // The f32 path is exact f32 math widened to f64, so its error
+            // against an f64 recomputation is bounded by f32 rounding at the
+            // canvas scale (sub-milli-pixel for this model).
+            let ex = (f32_out[i][0] - want_x).abs();
+            let ey = (f32_out[i][1] - want_y).abs();
+            worst = worst.max(ex).max(ey);
+            assert!(ex < 1e-3 && ey < 1e-3, "vertex {i}: f32 {ex} f64 {ey}");
+        }
+        assert!(
+            worst > 0.0,
+            "the f32 path should differ somewhere (else this proves nothing)"
+        );
+
+        // And the dispatcher really does take the f32 branch at this size.
+        let mut rz = Rasterizer::new();
+        rz.resize(200, 50);
+        rz.project(&large, &v, px_w, px_h);
+        assert_eq!(rz.proj.len(), n);
+        assert_eq!(rz.proj_ok, f32_ok, "dispatch must match the f32 batch");
+    }
+
+    #[test]
+    fn reused_projection_buffers_read_the_same_as_fresh_ones() {
+        // `project` re-fills `proj`/`proj_ok`/`proj_cam` in place instead of
+        // zeroing them every frame, so a slot a later frame does not write
+        // still holds an earlier frame's value. This walks a view through many
+        // frames on one long-lived Rasterizer and checks every frame against a
+        // freshly built one — a stale slot leaking into the output would show
+        // up here and nowhere else.
+        //
+        // The model has vertices at BOTH depth extremes and enough of them to
+        // take the f32 branch, and the frames pan through the near plane, so
+        // `proj_ok` genuinely flips true/false between frames. Without that
+        // flip the test passes even when a cull flag is left stale.
+        let far = 60.0;
+        let mut vertices = vec![(-1.0, -1.0, -1.0), (-1.0, 1.0, -1.0), (1.0, 1.0, -1.0)];
+        while vertices.len() < F32_PROJECT_THRESHOLD + 32 {
+            let t = vertices.len() as f64;
+            vertices.push((-far - t * 1e-3, t * 1e-3, -far - t * 2e-3));
+        }
+        let n = vertices.len();
+        let m = Model {
+            vertices,
+            edges: (0..n - 1).map(|i| (i, i + 1)).collect(),
+        };
+        assert!(n >= F32_PROJECT_THRESHOLD, "must take the f32 branch");
+
+        let mut reused = Rasterizer::new();
+        reused.resize(40, 20);
+
+        let mut v = ViewState {
+            dist: 8.0,
+            ..Default::default()
+        };
+        // Pan far enough that the `far` cluster drops behind the near plane on
+        // some frames and comes back on others.
+        let mut culled_seen = false;
+        let mut visible_seen = false;
+        for frame in 0..12 {
+            v.pan_y = -40.0 + frame as f64 * 8.0;
+            v.add_yaw(0.3);
+
+            let mut got = Screen::new(40, 20);
+            reused.render(&m, &v, (0, 0, 40, 20), true, 3.0, &mut got);
+            for &ok in &reused.proj_ok {
+                if ok {
+                    visible_seen = true;
+                } else {
+                    culled_seen = true;
+                }
+            }
+
+            let mut fresh = Rasterizer::new();
+            fresh.resize(40, 20);
+            let mut want = Screen::new(40, 20);
+            fresh.render(&m, &v, (0, 0, 40, 20), true, 3.0, &mut want);
+
+            for y in 0..20 {
+                for x in 0..40 {
+                    assert_eq!(
+                        got.cell(x, y),
+                        want.cell(x, y),
+                        "frame {frame} cell ({x},{y}): a reused buffer must not \
+                         leak a previous frame's projection"
+                    );
+                }
+            }
+        }
+        assert!(
+            culled_seen,
+            "the run must cull some vertices or it proves nothing"
+        );
+        assert!(visible_seen, "the run must project some vertices");
     }
 
     #[test]

@@ -222,8 +222,12 @@ pub fn project_point(p: (f64, f64, f64), v: &ViewState, px_h: usize) -> Option<(
 ///
 /// Same two paths as [`project_batch`], with the same `out` and `ok`
 /// results: above [`PARALLEL_THRESHOLD`] the per-vertex work (projection and
-/// camera-space point) runs on rayon threads. `cam` is only written where
-/// `ok` becomes `true`.
+/// camera-space point) runs on rayon threads.
+///
+/// `cam` is written for every vertex, culled ones included: an edge with one
+/// endpoint in front of the near plane is clipped against it using *both*
+/// camera-space points, so a caller that reuses its buffers would otherwise
+/// read a stale point from an earlier frame.
 pub fn project_batch_with_camera_space(
     verts: &[(f64, f64, f64)],
     v: &ViewState,
@@ -244,9 +248,7 @@ pub fn project_batch_with_camera_space(
             .zip(cam.par_iter_mut())
             .for_each(|(((p, o), ok_slot), cam_slot)| {
                 camera.project_into(*p, f, o, ok_slot);
-                if *ok_slot {
-                    *cam_slot = camera.camera_space(*p);
-                }
+                *cam_slot = camera.camera_space(*p);
             });
         return;
     }
@@ -282,27 +284,45 @@ pub fn project_batch(
     cam.project_all(verts, f, out, ok);
 }
 
-/// f32 batch projection for very large models (> 4096 vertices): same
-/// structure as [`project_batch`] with the camera and focal length cast
-/// down to f32 first (the large-model path).
-pub fn project_batch_f32(
+/// f32 batch projection for very large models (> 4096 vertices): the same
+/// results as [`project_batch_with_camera_space`], computed with the camera
+/// and focal length cast down to f32 first (the large-model path).
+///
+/// One traversal, one buffer: the f32 math lands straight in the f64 `out`
+/// slots (exact, so bit-identical to widening afterwards) and the camera-space
+/// point is filled in the *same* parallel pass. Widening the batch into `out`
+/// from a separate `[f32; 2]` grid used to be a serial tail costing more than
+/// the projection itself, twice over: the extra 24n bytes per frame, and the
+/// fact that it could not run on rayon while the projection did.
+///
+/// `cam` stays f64: the near-plane clipper interpolates between two
+/// camera-space points, so f32 there would lose the far end of a long segment.
+pub fn project_batch_f32_with_camera_space(
     verts: &[(f64, f64, f64)],
     v: &ViewState,
     px_h: usize,
-    out: &mut [[f32; 2]],
+    out: &mut [[f64; 2]],
     ok: &mut [bool],
+    cam_space: &mut [[f64; 3]],
 ) {
     let f = CameraF32::focal(px_h as f64);
-    let cam = CameraF32::new(&camera(v));
+    let camera = camera(v);
+    let cam32 = CameraF32::new(&camera);
     if verts.len() >= PARALLEL_THRESHOLD {
+        // rayon: the f32 projection and the camera-space point are both
+        // independent per vertex (same split as `project_batch`).
         verts
             .par_iter()
             .zip(out.par_iter_mut())
             .zip(ok.par_iter_mut())
-            .for_each(|((p, o), ok_slot)| cam.project_into(*p, f, o, ok_slot));
+            .zip(cam_space.par_iter_mut())
+            .for_each(|(((p, o), ok_slot), cam_slot)| {
+                cam32.project_into_f64(*p, f, o, ok_slot);
+                *cam_slot = camera.camera_space(*p);
+            });
         return;
     }
-    cam.project_all(verts, f, out, ok);
+    cam32.project_all_f64_with_camera_space(verts, f, out, ok, cam_space, &camera);
 }
 
 #[cfg(test)]

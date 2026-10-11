@@ -173,13 +173,20 @@ impl Camera {
         }
     }
 
-    /// [`Camera::project_all`] plus the camera-space point of every vertex
-    /// that projected, for callers that rasterize SEGMENTS: a segment is
-    /// clipped at the near plane with [`crate::raster::rasterize_camera_line`]
-    /// rather than dropped when one of its endpoints is culled.
+    /// [`Camera::project_all`] plus the camera-space point of EVERY vertex, for
+    /// callers that rasterize SEGMENTS: a segment is clipped at the near plane
+    /// with [`crate::raster::rasterize_camera_line`] rather than dropped when
+    /// one of its endpoints is culled.
     ///
-    /// `cam` is only written where `ok` becomes `true`, and the `out`/`ok`
-    /// results are identical to [`Camera::project_all`]'s.
+    /// `cam` is filled unconditionally, culled vertices included. A culled
+    /// vertex's point is still needed: an edge with one endpoint in front of
+    /// the plane is clipped against the near plane, and that crossing is
+    /// computed from *both* camera-space points. Leaving the slot untouched
+    /// would let a caller that reuses its buffers read a stale point from an
+    /// earlier frame. [`Camera::camera_space`] is pure math with no near-plane
+    /// test, so the culled value is well defined.
+    ///
+    /// The `out`/`ok` results are identical to [`Camera::project_all`]'s.
     pub fn project_all_with_camera_space(
         &self,
         verts: &[(f64, f64, f64)],
@@ -193,9 +200,7 @@ impl Camera {
         debug_assert_eq!(verts.len(), cam.len());
         for i in 0..verts.len() {
             self.project_into(verts[i], f, &mut out[i], &mut ok[i]);
-            if ok[i] {
-                cam[i] = self.camera_space(verts[i]);
-            }
+            cam[i] = self.camera_space(verts[i]);
         }
     }
 }
@@ -284,6 +289,76 @@ impl CameraF32 {
         debug_assert_eq!(verts.len(), ok.len());
         for i in 0..verts.len() {
             self.project_into(verts[i], f, &mut out[i], &mut ok[i]);
+        }
+    }
+
+    /// Project one vertex with the same f32 camera math as
+    /// [`CameraF32::project_into`], but land the result in an f64 slot so no
+    /// intermediate `[f32; 2]` buffer (and no second widening pass over the
+    /// whole grid) is needed.
+    ///
+    /// `f32 -> f64` is exact, so the value written here is bit-identical to
+    /// `project_into` followed by `as f64`.
+    pub fn project_into_f64(&self, p: (f64, f64, f64), f: f32, out: &mut [f64; 2], ok: &mut bool) {
+        let p0 = p.0 as f32;
+        let p1 = p.1 as f32;
+        let p2 = p.2 as f32;
+        let r = self.rot;
+        let rx = r[0][0] * p0 + r[0][1] * p1 + r[0][2] * p2 + self.pan_x;
+        let ry = r[1][0] * p0 + r[1][1] * p1 + r[1][2] * p2 + self.pan_y;
+        let rz = r[2][0] * p0 + r[2][1] * p1 + r[2][2] * p2;
+        let z = self.dist - rz;
+        if z <= 0.1 {
+            *ok = false;
+            return;
+        }
+        let (sr, cr) = (self.roll_sin, self.roll_cos);
+        let (dx, dy) = (rx - self.pan_x, ry - self.pan_y);
+        let rxr = self.pan_x + dx * cr - dy * sr;
+        let ryr = self.pan_y + dx * sr + dy * cr;
+        *out = [(f * rxr / z) as f64, (f * ryr / z) as f64];
+        *ok = true;
+    }
+
+    /// Serial batch entry for [`CameraF32::project_into_f64`].
+    pub fn project_all_f64(
+        &self,
+        verts: &[(f64, f64, f64)],
+        f: f32,
+        out: &mut [[f64; 2]],
+        ok: &mut [bool],
+    ) {
+        debug_assert_eq!(verts.len(), out.len());
+        debug_assert_eq!(verts.len(), ok.len());
+        for i in 0..verts.len() {
+            self.project_into_f64(verts[i], f, &mut out[i], &mut ok[i]);
+        }
+    }
+
+    /// Serial batch entry for [`CameraF32::project_into_f64`] that also fills
+    /// `cam_space` with `cam.camera_space(vertex)` for every vertex, in the
+    /// same traversal.
+    ///
+    /// The camera-space point stays f64 even on the f32 path: the near-plane
+    /// clipper interpolates between two of them, so an f32 screen coordinate
+    /// would lose the far end of a long segment. It is filled for culled
+    /// vertices too, for the reason spelled out on
+    /// [`Camera::project_all_with_camera_space`].
+    pub fn project_all_f64_with_camera_space(
+        &self,
+        verts: &[(f64, f64, f64)],
+        f: f32,
+        out: &mut [[f64; 2]],
+        ok: &mut [bool],
+        cam_space: &mut [[f64; 3]],
+        cam: &Camera,
+    ) {
+        debug_assert_eq!(verts.len(), out.len());
+        debug_assert_eq!(verts.len(), ok.len());
+        debug_assert_eq!(verts.len(), cam_space.len());
+        for i in 0..verts.len() {
+            self.project_into_f64(verts[i], f, &mut out[i], &mut ok[i]);
+            cam_space[i] = cam.camera_space(verts[i]);
         }
     }
 }
@@ -456,6 +531,52 @@ mod tests {
                     (false, None) => {}
                     (ok, want) => panic!("f32 cull mismatch {p:?}: ok={ok} want={want:?}"),
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn camera_f32_into_f64_matches_project_then_widen() {
+        // The f32 math must be unchanged by landing in an f64 slot, and the
+        // camera-space fill must match `Camera::camera_space` exactly. This is
+        // the contract that lets the renderer drop its `[f32; 2]` staging grid
+        // without touching a single output pixel.
+        for (cam, _) in cameras() {
+            let cam32 = CameraF32::new(&cam);
+            let f32v = CameraF32::focal(240.0);
+            let verts = points();
+            let n = verts.len();
+
+            // Reference: the shipped shape, project to f32 then widen.
+            let mut want_out = vec![[0.0f64; 2]; n];
+            let mut want_ok = vec![false; n];
+            for (i, &p) in verts.iter().enumerate() {
+                let (mut o32, mut k) = ([0.0f32; 2], false);
+                cam32.project_into(p, f32v, &mut o32, &mut k);
+                want_ok[i] = k;
+                if k {
+                    want_out[i] = [o32[0] as f64, o32[1] as f64];
+                }
+            }
+
+            // The new single-buffer path.
+            let mut out = vec![[0.0f64; 2]; n];
+            let mut ok = vec![false; n];
+            let mut space = vec![[0.0f64; 3]; n];
+            cam32.project_all_f64_with_camera_space(
+                &verts, f32v, &mut out, &mut ok, &mut space, &cam,
+            );
+
+            assert_eq!(ok, want_ok, "cull flags to the bit");
+            assert_eq!(out, want_out, "screen coordinates to the bit");
+            for i in 0..n {
+                // Every vertex, culled ones included: the near-plane clipper
+                // needs both ends of a segment that straddles the plane.
+                assert_eq!(
+                    space[i],
+                    cam.camera_space(verts[i]),
+                    "camera-space point {i}"
+                );
             }
         }
     }

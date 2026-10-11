@@ -283,13 +283,16 @@ const BINDINGS: &[Binding] = &[
         group: Group::Rotate,
         chords: &[key(KeyCode::Char('j')), key(KeyCode::Down)],
     },
+    // `d` reads left and `f` reads right, the way hjkl reads spatially: on a
+    // QWERTY home row `d` sits LEFT of `f`, so `d` rolls the image
+    // anticlockwise (its left side dips) and `f` rolls it clockwise.
     Binding {
-        action: Action::Motion(Motion::RollPlus),
+        action: Action::Motion(Motion::RollMinus),
         group: Group::Rotate,
         chords: &[key(KeyCode::Char('d'))],
     },
     Binding {
-        action: Action::Motion(Motion::RollMinus),
+        action: Action::Motion(Motion::RollPlus),
         group: Group::Rotate,
         chords: &[key(KeyCode::Char('f'))],
     },
@@ -348,12 +351,12 @@ const BINDINGS: &[Binding] = &[
         chords: &[ctrl(KeyCode::Char('j')), ctrl(KeyCode::Down)],
     },
     Binding {
-        action: Action::Motion(Motion::LocalRollPlus),
+        action: Action::Motion(Motion::LocalRollMinus),
         group: Group::Local,
         chords: &[ctrl(KeyCode::Char('d'))],
     },
     Binding {
-        action: Action::Motion(Motion::LocalRollMinus),
+        action: Action::Motion(Motion::LocalRollPlus),
         group: Group::Local,
         chords: &[ctrl(KeyCode::Char('f'))],
     },
@@ -567,11 +570,13 @@ fn apply_motion_step(view: &mut ViewState, m: Motion, rot: f64, mv: f64) {
         Motion::PitchUp => view.add_pitch(-rot),
         Motion::PitchDown => view.add_pitch(rot),
         // View-frame roll: `d` rolls about the sight line (into the
-        // screen) in the viewer's sense — the viewer's right side (screen
-        // right) dips, i.e. the image turns clockwise; `f` is the mirror.
+        // screen) in the viewer's sense — the viewer's left side (screen
+        // left) dips, i.e. the image turns anticlockwise; `f` is the mirror.
         // That axis is anti-parallel to the model's front (+Z out of the
         // screen), so plain d and Ctrl+d read as mirror images at the
-        // default view: Ctrl+d keeps the body reading (starboard dips).
+        // default view: Ctrl+d rolls the body to its own left, lifting
+        // starboard — the screen-LEFT side, since the model's own right is
+        // the viewer's left — where plain d dips it.
         Motion::RollPlus => view.roll -= rot,
         Motion::RollMinus => view.roll += rot,
         // Local-frame rotation: the same step post-multiplied, so the axis
@@ -772,8 +777,8 @@ const HELP_LEFT: &[HelpGroup] = &[
             HelpRow("l", "yaw right"),
             HelpRow("k", "pitch up"),
             HelpRow("j", "pitch down"),
-            HelpRow("d", "roll clockwise"),
-            HelpRow("f", "roll anticlockwise"),
+            HelpRow("d", "roll anticlockwise"),
+            HelpRow("f", "roll clockwise"),
         ],
     ),
     HelpGroup(
@@ -799,8 +804,8 @@ const HELP_RIGHT: &[HelpGroup] = &[
             HelpRow("Ctrl+l", "yaw to its own right"),
             HelpRow("Ctrl+k", "pitch up"),
             HelpRow("Ctrl+j", "pitch down"),
-            HelpRow("Ctrl+d", "roll clockwise"),
-            HelpRow("Ctrl+f", "roll anticlockwise"),
+            HelpRow("Ctrl+d", "roll to its own left"),
+            HelpRow("Ctrl+f", "roll to its own right"),
         ],
     ),
     HelpGroup("FRAME", &[HelpRow("c", "reset the view")]),
@@ -3480,8 +3485,8 @@ mod tests {
     #[test]
     fn plain_keys_are_the_viewers_frame_ctrl_the_models() {
         // The model faces out of the screen (+Z) while the sight line points
-        // into it: plain h/r must read as the viewer's left/right, Ctrl as
-        // the model's own — mirror images at the default view. Pitch has no
+        // into it: plain h/d must read as the viewer's left, Ctrl as the
+        // model's own — mirror images at the default view. Pitch has no
         // mirror: the model's up is the viewer's up, so k/j agree.
         let mut v = ViewState::default();
         apply_motion_step(&mut v, Motion::YawLeft, 0.3, 0.0);
@@ -3496,16 +3501,20 @@ mod tests {
         );
 
         let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::RollPlus, 0.3, 0.0);
+        apply_motion_step(&mut v, Motion::RollMinus, 0.3, 0.0);
         assert!(
-            v.roll < 0.0,
-            "plain d rolls about the sight line: the viewer's right dips (image CW)"
+            v.roll > 0.0,
+            "plain d rolls about the sight line: the viewer's left dips (image CCW)"
         );
 
         let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::LocalRollPlus, 0.3, 0.0);
-        // Starboard is the model's local -X; a right bank dips it (y < 0).
-        assert!(-v.rot[1][0] < 0.0, "Ctrl+d must dip the model's starboard");
+        apply_motion_step(&mut v, Motion::LocalRollMinus, 0.3, 0.0);
+        // Starboard is the model's local -X (= the viewer's screen left); a
+        // roll to its own LEFT lifts it (y > 0) — the mirror of plain d.
+        assert!(
+            -v.rot[1][0] > 0.0,
+            "Ctrl+d must roll the model to its own left"
+        );
 
         let mut v = ViewState::default();
         apply_motion_step(&mut v, Motion::PitchUp, 0.3, 0.0);
@@ -3654,8 +3663,8 @@ mod tests {
             (Char(' '), Action::Spin),
             (Tab, Action::Axes),
             (Char('c'), Action::Reset),
-            (Char('d'), Action::Motion(Motion::RollPlus)),
-            (Char('f'), Action::Motion(Motion::RollMinus)),
+            (Char('d'), Action::Motion(Motion::RollMinus)),
+            (Char('f'), Action::Motion(Motion::RollPlus)),
             (Char('h'), Action::Motion(Motion::YawLeft)),
             (Char('='), Action::Motion(Motion::MoveForward)),
             (Char('-'), Action::Motion(Motion::MoveBack)),

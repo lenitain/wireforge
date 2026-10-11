@@ -98,11 +98,12 @@ impl ViewState {
 
     /// Roll the model around its own (local) Z axis: positive `d` banks the
     /// model to its own right (right-hand turn about the nose axis, so its
-    /// starboard side dips). Plain `Motion::RollPlus` is the *viewer's* frame
-    /// instead — it rolls about the sight line, which points into the screen
-    /// while the nose points out of it, so at the default view the plain roll
-    /// key (`d`) and `Ctrl+d` read as mirror images (plain `d` dips the
-    /// viewer's right, `Ctrl+d` dips the model's starboard). Unlike yaw/pitch it does NOT
+    /// starboard side dips). The plain roll key (`d`, `Motion::RollMinus`) is
+    /// the *viewer's* frame instead: it rolls about the sight line, which
+    /// points into the screen while the nose points out of it, so at the
+    /// default view it and `Ctrl+d` read as mirror images (plain `d` dips the
+    /// viewer's left, `Ctrl+d` rolls the model to its own left and lifts
+    /// starboard). Unlike yaw/pitch it does NOT
     /// touch the `roll` field: `roll` is the authoritative camera-frame
     /// angle applied by `project_point`, so ticking it here as well would
     /// rotate the image twice; the HUD therefore reports world-frame roll

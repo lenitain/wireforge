@@ -140,8 +140,8 @@ Left and right read as you see them: the model faces out of the screen, so
 | `l` / `Right`             | Yaw right                           |
 | `k` / `Up`                | Pitch up                            |
 | `j` / `Down`              | Pitch down                          |
-| `d`                       | Roll clockwise (view axis)          |
-| `f`                       | Roll anticlockwise (view axis)      |
+| `d`                       | Roll anticlockwise (view axis)      |
+| `f`                       | Roll clockwise (view axis)          |
 
 #### Move — the world's plane
 
@@ -164,8 +164,8 @@ Same turns, but around the model's own frame: `Ctrl+h` yaws it to *its* left.
 | `Ctrl+l` / `Ctrl+Right`          | Yaw to its own right                |
 | `Ctrl+k` / `Ctrl+Up`             | Pitch up                            |
 | `Ctrl+j` / `Ctrl+Down`           | Pitch down                          |
-| `Ctrl+d`                         | Roll clockwise                      |
-| `Ctrl+f`                         | Roll anticlockwise                  |
+| `Ctrl+d`                         | Roll to its own left                |
+| `Ctrl+f`                         | Roll to its own right               |
 
 #### Frame — where the model sits on screen
 

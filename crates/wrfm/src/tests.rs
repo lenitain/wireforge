@@ -502,6 +502,95 @@ fn forward_reference_is_ok() {
     assert_eq!(model.edges.len(), 1);
 }
 
+/// The success path stores each edge line as a byte span and slices the text
+/// back out only when reporting `OutOfRange`: the caret line in the rendered
+/// error is what proves the span landed on the right bytes.
+#[test]
+fn out_of_range_slices_the_original_line_back_out() {
+    let err = WrfmModel::from_str("m", &v2(2, 1, "v 0 0 0\nv 1 1 1\ne 0 5\n"))
+        .expect_err("out of range index is an error");
+    match &err {
+        ParseError::InvalidEdge {
+            line,
+            column,
+            line_text,
+            ..
+        } => {
+            assert_eq!((*line, *column), (6, 5));
+            assert_eq!(line_text, "e 0 5");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    let rendered = format!("{err}");
+    assert!(
+        rendered.contains("error: invalid edge at line 6, column 5"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("6 | e 0 5"), "{rendered}");
+    assert!(rendered.contains("|     ^"), "{rendered}");
+}
+
+/// A BOM shifts the whole file by 3 bytes relative to the original `&str`; the
+/// span must be measured against the BOM-stripped text, or the reported line
+/// comes out sheared (`" 0\ne "` instead of `"e 0 5"`).
+#[test]
+fn out_of_range_after_bom_reports_the_real_line() {
+    let err = WrfmModel::from_str(
+        "m",
+        "\u{feff}wrfm 2\nvertices 2   edges 1\nv 0 0 0\nv 1 1 1\ne 0 5\n",
+    )
+    .expect_err("out of range index is an error");
+    match &err {
+        ParseError::InvalidEdge {
+            line,
+            column,
+            line_text,
+            ..
+        } => {
+            assert_eq!((*line, *column), (5, 5));
+            assert_eq!(line_text, "e 0 5", "BOM must not shear the reported line");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert!(format!("{err}").contains("5 | e 0 5"), "{err}");
+}
+
+/// CRLF input: `lines()` strips the `\r`, and so must the span.
+#[test]
+fn out_of_range_with_crlf_reports_a_clean_line() {
+    let err = WrfmModel::from_str(
+        "m",
+        "wrfm 2\r\nvertices 2   edges 1\r\nv 0 0 0\r\nv 1 1 1\r\ne 0 5\r\n",
+    )
+    .expect_err("out of range index is an error");
+    match &err {
+        ParseError::InvalidEdge { line_text, .. } => {
+            assert_eq!(line_text, "e 0 5", "no trailing \\r in the reported line");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+/// Indented edge line inside a `group`: the span covers the raw line including
+/// its leading whitespace, so the column still points at the offending token.
+#[test]
+fn out_of_range_on_an_indented_group_edge_keeps_its_columns() {
+    let err = WrfmModel::from_str("m", &v2(2, 1, "group a\n  v 0 0 0\n  v 1 1 1\n  e 0 5\n"))
+        .expect_err("out of range index is an error");
+    match &err {
+        ParseError::InvalidEdge {
+            line,
+            column,
+            line_text,
+            ..
+        } => {
+            assert_eq!((*line, *column), (7, 7));
+            assert_eq!(line_text, "  e 0 5");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
 #[test]
 fn unknown_line_skipped() {
     let model =

@@ -28,7 +28,9 @@ impl WrfmModel {
     /// assert_eq!(model.edges, vec![(0, 1)]);
     /// ```
     pub fn from_str(name: &str, input: &str) -> Result<Self, ParseError> {
-        let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+        // Shadow `input` with the BOM-stripped text, so no slice can be taken
+        // from the original and land 3 bytes off (U+FEFF is 3 bytes in UTF-8).
+        let source = input.strip_prefix('\u{feff}').unwrap_or(input);
         let mut model = WrfmModel {
             name: name.to_string(),
             vertices: Vec::new(),
@@ -36,10 +38,13 @@ impl WrfmModel {
             version: 2,
             groups: Vec::new(),
         };
-        // Source location of each parsed edge, needed to report OutOfRange.
-        let mut edge_meta: Vec<(usize, usize, usize, String)> = Vec::new();
+        // Source location of each parsed edge, needed to report OutOfRange:
+        // line number, both index columns, and the byte span of the line inside
+        // `source` — the line text itself is sliced back out only on the error
+        // path, so the success path stores positions instead of a `String` copy.
+        let mut edge_meta: Vec<(usize, usize, usize, core::ops::Range<usize>)> = Vec::new();
 
-        let mut lines = input.lines();
+        let mut lines = source.lines();
 
         // Magic: line 1 must be `wrfm <version>`.
         let first_line = lines.next().unwrap_or("");
@@ -268,7 +273,10 @@ impl WrfmModel {
                         }
                     }
                     model.edges.push((indices[0], indices[1]));
-                    edge_meta.push((line, cols[0], cols[1], raw_line.to_string()));
+                    let line_start = raw_line.as_ptr() as usize - source.as_ptr() as usize;
+                    let line_span = line_start..line_start + raw_line.len();
+                    debug_assert_eq!(&source[line_span.clone()], raw_line, "span must round-trip");
+                    edge_meta.push((line, cols[0], cols[1], line_span));
                     if model.edges.len() > declared_edges {
                         return Err(ParseError::CountMismatch {
                             line,
@@ -334,12 +342,12 @@ impl WrfmModel {
         // references to later-defined vertices are legal.
         let vertex_count = model.vertices.len();
         for (i, &(a, b)) in model.edges.iter().enumerate() {
-            let (edge_line, col_a, col_b, line_text) = &edge_meta[i];
+            let (edge_line, col_a, col_b, line_span) = &edge_meta[i];
             if a >= vertex_count {
                 return Err(ParseError::InvalidEdge {
                     line: *edge_line,
                     column: *col_a,
-                    line_text: line_text.clone(),
+                    line_text: source[line_span.clone()].to_string(),
                     detail: EdgeError::OutOfRange {
                         index: a,
                         vertex_count,
@@ -351,7 +359,7 @@ impl WrfmModel {
                 return Err(ParseError::InvalidEdge {
                     line: *edge_line,
                     column: *col_b,
-                    line_text: line_text.clone(),
+                    line_text: source[line_span.clone()].to_string(),
                     detail: EdgeError::OutOfRange {
                         index: b,
                         vertex_count,

@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use wrfm_raster::Model;
 use wrfm_raster::geometry::bounds;
 
@@ -128,17 +129,64 @@ fn angle_to_axis(evec: [f64; 3], axis: usize) -> f64 {
 }
 
 /// Mirror-symmetry test across the plane perpendicular to `axis`
+/// Positions quantised to the symmetry epsilon, as integer keys.
+///
+/// The mirror of a vertex is looked up BY POSITION. The obvious form — for each
+/// vertex, scan every other vertex for its twin — is O(V^2): on a UV sphere the
+/// twin of the first vertex by index sits at the far end of the list, so the
+/// early-exit saves nothing, and `wrfm geometry` spent 87% of its time there
+/// (perf: the two `any` closures below). A sphere is symmetric under three
+/// mirrors, so it exercises every one of these probes.
+///
+/// Quantising to `eps` (rather than hashing raw bit patterns) mirrors the old
+/// `abs() < eps` comparison, so a mirrored twin that differs in the last bits
+/// still counts. Two vertices in the SAME cell are within `eps` of each other,
+/// and `eps` is far smaller than the spacing of any real model, so the buckets
+/// hold at most a handful of points.
+fn position_index(m: &Model, eps: f64) -> HashSet<(i64, i64, i64)> {
+    let q = |v: f64| (v / eps).round() as i64;
+    m.vertices
+        .iter()
+        .map(|&(x, y, z)| (q(x), q(y), q(z)))
+        .collect()
+}
+
+/// Whether `index` holds a point within `eps` of `p`.
+///
+/// Every candidate cell within `eps` is checked, not just the one `p` rounds
+/// into: a twin sitting on the far side of a cell boundary would otherwise be
+/// missed (the same class of miss the `proximity::Grid` 27-cell probe fixed for
+/// near-duplicate vertices).
+fn has_twin_within(index: &HashSet<(i64, i64, i64)>, p: [f64; 3], eps: f64) -> bool {
+    let cell = [
+        (p[0] / eps).round() as i64,
+        (p[1] / eps).round() as i64,
+        (p[2] / eps).round() as i64,
+    ];
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                if index.contains(&(cell[0] + dx, cell[1] + dy, cell[2] + dz)) {
+                    // The cell is within eps in every coordinate, so the point
+                    // it holds is a twin by the same test the scan used.
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn has_mirror_symmetry(m: &Model, axis: usize) -> bool {
     let eps = 1e-6;
+    let index = position_index(m, eps);
     m.vertices.iter().all(|&(x, y, z)| {
         let mir = [
             if axis == 0 { -x } else { x },
             if axis == 1 { -y } else { y },
             if axis == 2 { -z } else { z },
         ];
-        m.vertices.iter().any(|&(mx, my, mz)| {
-            (mx - mir[0]).abs() < eps && (my - mir[1]).abs() < eps && (mz - mir[2]).abs() < eps
-        })
+        has_twin_within(&index, mir, eps)
     })
 }
 
@@ -154,15 +202,14 @@ fn has_center_mirror_symmetry(m: &Model, axis: usize) -> bool {
         (min[1] + max[1]) / 2.0,
         (min[2] + max[2]) / 2.0,
     ];
+    let index = position_index(m, eps);
     m.vertices.iter().all(|&(x, y, z)| {
         let mir = [
             if axis == 0 { 2.0 * c[0] - x } else { x },
             if axis == 1 { 2.0 * c[1] - y } else { y },
             if axis == 2 { 2.0 * c[2] - z } else { z },
         ];
-        m.vertices.iter().any(|&(mx, my, mz)| {
-            (mx - mir[0]).abs() < eps && (my - mir[1]).abs() < eps && (mz - mir[2]).abs() < eps
-        })
+        has_twin_within(&index, mir, eps)
     })
 }
 
@@ -497,5 +544,106 @@ mod tests {
             json!([f64::INFINITY, f64::INFINITY, f64::INFINITY])
         );
         assert_eq!(g["closure"]["closed"], false);
+    }
+}
+
+#[cfg(test)]
+mod symmetry_scale_tests {
+    use super::*;
+
+    /// A UV sphere is mirror-symmetric about BOTH its x and z planes, and its
+    /// centre, and every vertex's twin sits far from it in the list — the
+    /// adversarial input for a per-vertex linear search. The old form is O(V^2)
+    /// here (profiled: 87% of `wrfm geometry` on a 90k sphere) and takes
+    /// minutes at this size.
+    fn uv_sphere(rings: usize, segs: usize) -> Model {
+        let mut vertices = Vec::with_capacity(rings * segs);
+        for i in 0..rings {
+            let phi = std::f64::consts::PI * (i as f64 + 0.5) / rings as f64;
+            for j in 0..segs {
+                let theta = 2.0 * std::f64::consts::PI * j as f64 / segs as f64;
+                vertices.push((phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin()));
+            }
+        }
+        Model {
+            vertices,
+            edges: Vec::new(),
+        }
+    }
+
+    /// 100k vertices, all six symmetry probes, under a wall-clock budget.
+    ///
+    /// The budget is the assertion, not decoration: an O(V^2) walk PASSES this
+    /// test in 289 s, so without a bound the test reports nothing at all. The
+    /// old timing was ~290 s and the fixed one is milliseconds, so the 20 s
+    /// threshold is two orders of magnitude clear of both — this is a
+    /// complexity guard, not a benchmark.
+    #[test]
+    fn sphere_symmetry_is_detected_at_scale() {
+        let m = uv_sphere(250, 400); // 100k vertices
+        let t = std::time::Instant::now();
+        // A sphere is symmetric about every axis through its centre.
+        assert!(has_mirror_symmetry(&m, 0), "x mirror");
+        assert!(has_mirror_symmetry(&m, 1), "y mirror");
+        assert!(has_mirror_symmetry(&m, 2), "z mirror");
+        assert!(has_center_mirror_symmetry(&m, 0), "centre x mirror");
+        assert!(has_center_mirror_symmetry(&m, 1), "centre y mirror");
+        assert!(has_center_mirror_symmetry(&m, 2), "centre z mirror");
+        let secs = t.elapsed().as_secs_f64();
+        assert!(
+            secs < 20.0,
+            "six symmetry probes over {} vertices took {secs:.1}s — that is the O(V^2) walk, not a lookup",
+            m.vertices.len()
+        );
+    }
+
+    /// An asymmetric model must come back false — the twin lookup may not turn
+    /// "no twin" into "close enough".
+    #[test]
+    fn asymmetric_model_is_rejected() {
+        let mut m = uv_sphere(20, 40);
+        // Move one vertex far off the sphere: its mirror no longer exists.
+        m.vertices[7] = (99.0, 99.0, 99.0);
+        assert!(!has_mirror_symmetry(&m, 0));
+        assert!(!has_mirror_symmetry(&m, 1));
+        assert!(!has_mirror_symmetry(&m, 2));
+        assert!(!has_center_mirror_symmetry(&m, 0));
+    }
+
+    /// Off-axis symmetric shapes must still work: the twin is found by
+    /// position, not by index arithmetic.
+    #[test]
+    fn off_origin_box_is_symmetric() {
+        let m = Model {
+            vertices: vec![
+                (10.0, 20.0, 30.0),
+                (14.0, 20.0, 30.0),
+                (10.0, 26.0, 30.0),
+                (14.0, 26.0, 30.0),
+                (10.0, 20.0, 38.0),
+                (14.0, 20.0, 38.0),
+                (10.0, 26.0, 38.0),
+                (14.0, 26.0, 38.0),
+            ],
+            edges: Vec::new(),
+        };
+        assert!(has_center_mirror_symmetry(&m, 0));
+        assert!(has_center_mirror_symmetry(&m, 1));
+        assert!(has_center_mirror_symmetry(&m, 2));
+        // ...but NOT mirror-symmetric about the origin planes.
+        assert!(!has_mirror_symmetry(&m, 0));
+    }
+
+    /// Duplicate coordinates must not fake a mirror image: a cloud of one
+    /// repeated point mirrors onto itself, but a cloud plus one stray does not.
+    #[test]
+    fn duplicates_do_not_fake_symmetry() {
+        let m = Model {
+            vertices: vec![(1.0, 1.0, 1.0), (1.0, 1.0, 1.0)],
+            edges: Vec::new(),
+        };
+        // -1 is absent, so the x mirror genuinely fails even though the
+        // duplicate pair matches each other.
+        assert!(!has_mirror_symmetry(&m, 0));
     }
 }

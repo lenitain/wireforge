@@ -48,21 +48,75 @@ struct ScreenGrid {
 }
 
 impl ScreenGrid {
-    /// Sample an edge every `step` screen units, calling `f` with the grid cell (and its interpolated depth) each sample lands in.
+    /// The grid's screen-space box, `[x0, x1, y0, y1]`.
+    fn bbox(&self) -> [f64; 4] {
+        [
+            self.minx,
+            self.minx + (self.w.saturating_sub(1)) as f64 * self.step,
+            self.miny,
+            self.miny + (self.h.saturating_sub(1)) as f64 * self.step,
+        ]
+    }
+
+    /// Parametric range of the segment inside the box, as `[t_enter, t_exit]`,
+    /// or `None` when it misses the box. Liang–Barsky over the four edges.
+    fn clip_to_box(&self, p1: &Projected, p2: &Projected) -> Option<[f64; 2]> {
+        let [x0, x1, y0, y1] = self.bbox();
+        let (dx, dy) = (p2.px - p1.px, p2.py - p1.py);
+        let (mut enter, mut exit) = (0.0f64, 1.0f64);
+        // (numerator, denominator) per box edge: x = x0, x = x1, y = y0, y = y1.
+        for (num, den) in [
+            (-(p1.px - x0), dx),
+            (p1.px - x1, -dx),
+            (-(p1.py - y0), dy),
+            (p1.py - y1, -dy),
+        ] {
+            if den == 0.0 {
+                if num > 0.0 {
+                    return None; // parallel to this edge and outside it
+                }
+                continue;
+            }
+            let t = num / den;
+            if den > 0.0 {
+                enter = enter.max(t);
+            } else {
+                exit = exit.min(t);
+            }
+            if enter > exit {
+                return None;
+            }
+        }
+        Some([enter, exit])
+    }
+
+    /// Sample the part of the edge that lies inside the grid, every `step`
+    /// screen units, calling `f` with the cell (and interpolated depth) of each.
+    ///
+    /// The span is CLIPPED first. Stepping the whole segment instead made the
+    /// cost per edge `screen_length / step`, which for a model whose vertices
+    /// spread over thousands of units is far larger than the grid: `wrfm view`
+    /// on a 30k-spoke star walked ~96M samples per pass, almost all of them
+    /// outside the grid and dropped by the bounds test, and took 56 s.
     fn for_each_sample(
         &self,
         p1: &Projected,
         p2: &Projected,
         mut f: impl FnMut(usize, usize, f64),
     ) {
+        let Some([t0, t1]) = self.clip_to_box(p1, p2) else {
+            return;
+        };
         let (dx, dy) = (p2.px - p1.px, p2.py - p1.py);
-        let len = (dx * dx + dy * dy).sqrt();
-        let n = ((len / self.step).ceil() as usize).max(1);
+        let dd = p2.depth - p1.depth;
+        // Length of the CLIPPED span, so the sample count is bounded by the box.
+        let (cx, cy) = (dx * (t1 - t0), dy * (t1 - t0));
+        let n = (((cx * cx + cy * cy).sqrt() / self.step).ceil() as usize).max(1);
         for i in 0..=n {
-            let t = i as f64 / n as f64;
+            let t = t0 + (t1 - t0) * (i as f64 / n as f64);
             let x = p1.px + t * dx;
             let y = p1.py + t * dy;
-            let d = p1.depth + t * (p2.depth - p1.depth);
+            let d = p1.depth + t * dd;
             let gx = ((x - self.minx) / self.step) as i64;
             let gy = ((y - self.miny) / self.step) as i64;
             if gx >= 0 && gy >= 0 && (gx as usize) < self.w && (gy as usize) < self.h {
@@ -190,14 +244,20 @@ pub fn analyze(m: &Model, p: &ViewParams) -> Value {
         let (pa, pb) = (&proj[e.a].as_ref().unwrap(), &proj[e.b].as_ref().unwrap());
         let mut total = 0usize;
         let mut covered = 0usize;
+        // Membership by flag array, not by `Vec::contains`: for a model where
+        // every edge occludes every other one (a star), the linear scan inside
+        // the sampling loop is O(E) per sample. Collected into JSON once below.
+        let mut occluder_seen = vec![false; vis.len()];
         let mut occluders: Vec<usize> = Vec::new();
         grid.for_each_sample(pa, pb, |gx, gy, d| {
             total += 1;
             let (min_d, owner) = zbuf[gy][gx];
             if owner >= 0 && owner as usize != ei && min_d < d - 0.05 {
                 covered += 1;
-                if !occluders.contains(&(owner as usize)) {
-                    occluders.push(owner as usize);
+                let o = owner as usize;
+                if !occluder_seen[o] {
+                    occluder_seen[o] = true;
+                    occluders.push(o);
                 }
             }
         });
@@ -386,5 +446,89 @@ mod tests {
         let r = analyze(&cube(), &p);
         let hull = r["silhouette"]["hull_vertices"].as_array().unwrap();
         assert_eq!(hull.len(), 4);
+    }
+
+    /// A star whose spokes span thousands of units: an edge projects to a long
+    /// screen segment, so the sampler's step count is `screen_length / 4` — and
+    /// the >grid part of every segment is stepped over only to be thrown away by
+    /// the in-bounds test. With 30k spokes the old form walked ~96M samples per
+    /// pass and `wrfm view` took 56 s.
+    ///
+    /// The scale is the variable that matters, so this fixture is parametrised
+    /// and the test checks the SCALING, not one lucky size.
+    fn star(spokes: usize, reach: f64) -> Model {
+        let mut vertices = vec![(0.0, 0.0, 0.0)];
+        let mut edges = Vec::new();
+        for i in 1..=spokes {
+            let a = i as f64 / spokes as f64 * 2.0 * std::f64::consts::PI;
+            vertices.push((a.cos() * reach, a.sin() * reach, 0.0));
+            edges.push((0, i));
+        }
+        Model { vertices, edges }
+    }
+
+    /// The budget is the assertion: the old code passes this test eventually, so
+    /// without a bound the test reports nothing.
+    #[test]
+    fn star_view_stays_within_budget() {
+        let m = star(20_000, 10_000.0);
+        let t = std::time::Instant::now();
+        let r = analyze(&m, &params());
+        let secs = t.elapsed().as_secs_f64();
+        assert_eq!(r["totals"]["edges"], 20_000);
+        assert!(
+            secs < 20.0,
+            "20k long spokes took {secs:.1}s — the sampler is stepping the off-grid part of every edge"
+        );
+    }
+
+    /// Four times the spokes must not cost anything like sixteen times the work.
+    /// A quadratic sampler fails this even when both sizes happen to fit in the
+    /// budget above.
+    #[test]
+    fn view_cost_grows_no_faster_than_linearly_with_spokes() {
+        let time = |spokes: usize| {
+            let m = star(spokes, 10_000.0);
+            let t = std::time::Instant::now();
+            let _ = analyze(&m, &params());
+            t.elapsed().as_secs_f64().max(1e-6)
+        };
+        let small = time(5_000);
+        let big = time(20_000);
+        let ratio = big / small;
+        assert!(
+            ratio < 8.0,
+            "4x the spokes cost {ratio:.1}x the time ({small:.3}s -> {big:.3}s): worse than linear"
+        );
+    }
+
+    /// Occluders must be reported ONCE each, however many samples the edge
+    /// contributed: dedup is what the linear `contains` was doing.
+    #[test]
+    fn occluders_are_reported_without_duplicates() {
+        // Two long edges and one short far edge between them: the short edge is
+        // covered by both, and each must appear exactly once.
+        let m = Model {
+            vertices: vec![
+                (-1.0, 0.0, 5.0),
+                (1.0, 0.0, 5.0),
+                (-1.0, 0.0, -5.0),
+                (1.0, 0.0, -5.0),
+                (-0.2, 0.0, 0.0),
+                (0.2, 0.0, 0.0),
+            ],
+            edges: vec![(0, 1), (2, 3), (2, 3), (4, 5)],
+        };
+        let r = analyze(&m, &params());
+        let occ = r["occluded_edges"].as_array().unwrap();
+        for e in occ {
+            let list = e["occluded_by"].as_array().unwrap();
+            let mut seen = Vec::new();
+            for p in list {
+                let key = format!("{p}");
+                assert!(!seen.contains(&key), "duplicate occluder {key}");
+                seen.push(key);
+            }
+        }
     }
 }

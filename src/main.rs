@@ -3294,6 +3294,58 @@ mod tests {
             "held key must rotate continuously immediately"
         );
     }
+
+    /// The roll keys (`d` / `f`) move ONLY the camera roll, which no other
+    /// rotation key touches — so a renderer that drops the roll leaves them
+    /// turning nothing on screen while `hjkl` and `Ctrl+d` keep working.
+    /// Pin the whole chain the operator sees: key event -> held motion ->
+    /// composed frame.
+    #[test]
+    fn d_key_turns_the_composed_frame() {
+        let frame = |app: &mut App| {
+            let mut engine = Engine::new(60, 20);
+            compose_frame(app, &mut engine);
+            let (w, h) = engine.screen.size();
+            let screen = &engine.screen;
+            // The canvas only: rows 1..h-1. Row 0 is the telemetry band and
+            // the last row the statusline, and the telemetry line prints the
+            // roll ANGLE — it changes whether or not the model turns, so
+            // comparing it would let a dead renderer pass.
+            (1..h - 1)
+                .flat_map(move |y| (0..w).map(move |x| screen.symbol(x, y)))
+                .collect::<Vec<_>>()
+        };
+        let mut app = App::new(
+            Model {
+                vertices: vec![
+                    (1.0, 1.0, 1.0),
+                    (1.0, -1.0, -1.0),
+                    (-1.0, 1.0, -1.0),
+                    (-1.0, -1.0, 1.0),
+                ],
+                edges: vec![(0, 1), (0, 2), (0, 3), (1, 2), (2, 3), (3, 1)],
+            },
+            "tetra".to_string(),
+            None,
+            DEFAULT_VFOV,
+        );
+        let before = frame(&mut app);
+        assert!(
+            before.iter().any(|c| ('\u{2800}'..='\u{28ff}').contains(c)),
+            "the model must be on screen before its roll is checked"
+        );
+        app.handle_input(Event::Key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE,
+        )));
+        app.update_held(Instant::now(), 0.1);
+        let after = frame(&mut app);
+        assert_ne!(
+            before, after,
+            "plain d (view roll) must turn what is on screen"
+        );
+    }
+
     #[test]
     fn app_handle_input_toggles() {
         let mut app = App::new(

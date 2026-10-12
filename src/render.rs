@@ -3,8 +3,7 @@ use std::io::Write;
 use wrfm_raster::Model;
 
 use crate::view::{self, ViewState};
-use wrfm_raster::projection::focal;
-use wrfm_raster::projection::project_camera_point;
+use wrfm_raster::projection::{Camera, focal};
 use wrfm_raster::raster::{Viewport, clip_near, rasterize_camera_line};
 
 /// An empty cell: a space in the terminal's own colors, on its own background.
@@ -481,12 +480,17 @@ impl Rasterizer {
         self.colors.fill(0);
 
         let cyan = Ink::Cyan as u8;
+        // The camera once per frame: the edges, the axes and the labels all
+        // draw through it, and the ROLL it carries is only ever applied here
+        // (`Camera::canvas_point`) — a path that draws camera-space points
+        // raw would silently render an unrolled frame.
+        let cam = view::camera(view);
         if model.edges.len() > PARALLEL_EDGE_THRESHOLD {
             // Stage C: parallel rasterization over edge chunks. Each worker
             // paints into its own scratch grid, then the grids are OR-ed into
             // the resident buffers. All model dots are cyan, so the merge is
             // order-independent.
-            self.rasterize_edges_par(&model.edges, vp, cyan, view.vfov);
+            self.rasterize_edges_par(&model.edges, vp, cyan, view.vfov, &cam);
         } else {
             for &(a, b) in &model.edges {
                 if !self.proj_ok[a] && !self.proj_ok[b] {
@@ -498,6 +502,7 @@ impl Rasterizer {
                     self.proj_cam[b],
                     self.proj_ok[b],
                     cyan,
+                    &cam,
                     focal(px_h as f64, view.vfov),
                     vp,
                     &mut self.dots,
@@ -518,7 +523,6 @@ impl Rasterizer {
         let mut labels: Vec<(f64, f64, &str, u8)> = Vec::new();
         if show_axes {
             let axis_len = extent / 0.618;
-            let cam = view::camera(view);
             let scale = focal(px_h as f64, view.vfov);
             let origin = cam.camera_space((0.0, 0.0, 0.0));
             let origin_ok = origin[2] > wrfm_raster::projection::NEAR;
@@ -539,6 +543,7 @@ impl Rasterizer {
                     end,
                     end_ok,
                     color,
+                    &cam,
                     scale,
                     vp,
                     &mut self.dots,
@@ -555,7 +560,7 @@ impl Rasterizer {
                 } else {
                     clip_near(origin, end).map_or(origin, |(_, hit)| hit)
                 };
-                let (lx, ly) = project_camera_point(visible_end, scale);
+                let (lx, ly) = cam.canvas_point(visible_end, scale);
                 if !point_is_on_canvas(lx, ly, px_w, px_h) {
                     continue;
                 }
@@ -656,6 +661,7 @@ fn paint_segment_into(
     b: [f64; 3],
     b_ok: bool,
     color: u8,
+    cam: &Camera,
     scale: f64,
     vp: Viewport,
     dots: &mut [u8],
@@ -674,7 +680,9 @@ fn paint_segment_into(
     rasterize_camera_line(
         a,
         b,
-        |p| project_camera_point(p, scale),
+        // The camera-space points carry the roll nowhere else: `canvas_point`
+        // is what turns them into canvas coordinates, roll included.
+        |p| cam.canvas_point(p, scale),
         vp,
         |cell, bit| {
             dots[cell] |= bit;
@@ -701,6 +709,7 @@ impl Rasterizer {
         vp: Viewport,
         color: u8,
         vfov: f64,
+        cam: &Camera,
     ) {
         use rayon::prelude::*;
         let cells = vp.cells();
@@ -746,6 +755,7 @@ impl Rasterizer {
                             proj_cam[b],
                             proj_ok[b],
                             color,
+                            cam,
                             scale,
                             vp,
                             pat,
@@ -826,6 +836,11 @@ mod tests {
     }
 
     /// Render the model exactly as the pre-L2 braille path did (golden).
+    ///
+    /// Every point is drawn through [`Camera::canvas_point`], roll included:
+    /// the pre-L2 path projected vertices (roll and all), so a golden that
+    /// dropped the roll would let the parity tests agree on an UNROLLED
+    /// frame — which is exactly how the rasterizer's roll once went missing.
     fn render_ratatui(model: &Model, view: &ViewState, w: u16, h: u16) -> Buffer {
         let px_w = w as usize * 2;
         let px_h = h as usize * 4;
@@ -844,8 +859,8 @@ mod tests {
                     if let Some((ca, cb)) =
                         clipped_segment(&cam, model.vertices[a], model.vertices[b])
                     {
-                        let (x1, y1) = project_camera_point(ca, scale);
-                        let (x2, y2) = project_camera_point(cb, scale);
+                        let (x1, y1) = cam.canvas_point(ca, scale);
+                        let (x2, y2) = cam.canvas_point(cb, scale);
                         ctx.draw(&Line {
                             x1,
                             y1,
@@ -872,8 +887,8 @@ mod tests {
                         continue;
                     }
                     if let Some((ca, cb)) = clipped_segment(&cam, (0.0, 0.0, 0.0), tip) {
-                        let (x1, y1) = project_camera_point(ca, scale);
-                        let (x2, y2) = project_camera_point(cb, scale);
+                        let (x1, y1) = cam.canvas_point(ca, scale);
+                        let (x2, y2) = cam.canvas_point(cb, scale);
                         ctx.draw(&Line {
                             x1,
                             y1,
@@ -887,7 +902,7 @@ mod tests {
                     } else {
                         clip_near(origin, end).map_or(origin, |(_, hit)| hit)
                     };
-                    let e = project_camera_point(visible_end, scale);
+                    let e = cam.canvas_point(visible_end, scale);
                     if !point_is_on_canvas(e.0, e.1, px_w, px_h) {
                         continue;
                     }
@@ -1000,6 +1015,49 @@ mod tests {
         let mut v2 = fit(&m);
         v2.roll = 0.9;
         assert_identical(&m, &v2, 40, 20);
+        // Roll about a PANNED pivot: the pivot is the panned origin, so this
+        // is the case a screen-centre roll would get wrong.
+        v2.pan_x = 3.0;
+        v2.pan_y = -2.0;
+        assert_identical(&m, &v2, 40, 20);
+    }
+
+    /// The rasterizer's frame as a grid of `(char, fg)` cells.
+    fn render_cells(m: &Model, v: &ViewState, w: usize, h: usize) -> Vec<Vec<(char, u8)>> {
+        let mut screen = Screen::new(w, h);
+        let mut raster = Rasterizer::new();
+        raster.resize(w, h);
+        raster.render(m, v, (0, 0, w, h), true, view::model_extent(m), &mut screen);
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| {
+                        let cell = screen.cell(x, y);
+                        (
+                            char::from_u32((cell >> 16) as u32).unwrap(),
+                            (cell & 0xff) as u8,
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The roll keys (`d` / `f`) change ONLY the camera roll, and the
+    /// rasterizer draws from camera-space points — which carry the roll in
+    /// exactly one place, [`Camera::canvas_point`]. A roll the frame ignores
+    /// is a `d` / `f` that does nothing on screen, so pin the visible effect.
+    #[test]
+    fn roll_turns_the_rasterized_frame() {
+        let m = cube();
+        let mut v = fit(&m);
+        let unrolled = render_cells(&m, &v, 40, 20);
+        v.roll = 0.9;
+        let rolled = render_cells(&m, &v, 40, 20);
+        assert_ne!(
+            unrolled, rolled,
+            "roll=0.9 must visibly turn the frame (d/f do nothing otherwise)"
+        );
     }
 
     #[test]
@@ -1715,6 +1773,9 @@ mod tests {
         let e = view::model_extent(&m);
         let mut v = ViewState::default();
         v.fit_to(&m);
+        // A non-zero roll: the camera carries it into `canvas_point`, and
+        // both paths must carry it the same way.
+        v.roll = 0.6;
         let (cw, ch) = (200usize, 50usize);
         let vp = Viewport::centered(cw * 2, ch * 4);
         let scale = focal((ch * 4) as f64, v.vfov);
@@ -1724,6 +1785,7 @@ mod tests {
         for frame in 0..4 {
             v.add_yaw(0.05); // a new view each frame: no projection cache to hide behind
             par.render(&m, &v, (0, 1, cw, ch), false, e, &mut screen);
+            let cam = view::camera(&v);
             let mut sd = vec![0u8; vp.cells()];
             let mut sc = vec![0u8; vp.cells()];
             for &(a, b) in &m.edges {
@@ -1736,6 +1798,7 @@ mod tests {
                     par.proj_cam[b],
                     par.proj_ok[b],
                     Ink::Cyan as u8,
+                    &cam,
                     scale,
                     vp,
                     &mut sd,

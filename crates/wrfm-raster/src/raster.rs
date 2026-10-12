@@ -255,9 +255,11 @@ pub fn braille_char(pattern: u8) -> char {
 /// `a` and `b` are camera-space points (`[x, y, z]`, `z` = distance in front
 /// of the camera, with `z <= NEAR` behind it, see
 /// [`crate::projection::NEAR`]); `project` maps such a point to canvas
-/// coordinates — for [`crate::projection::Camera`] that is the focal divide
-/// `[x, y] * focal / z`. [`crate::projection::project_camera_point`] is the
-/// free-function form of it.
+/// coordinates — for [`crate::projection::Camera`] that is
+/// [`crate::projection::Camera::canvas_point`] (the focal divide, with the
+/// camera ROLL applied about the panned pivot).
+/// [`crate::projection::project_camera_point`] is the raw free-function form
+/// of the divide alone, for points that are already rolled.
 ///
 /// Dropping a segment because ONE endpoint sits behind the camera plane
 /// throws away the part that is still in view: the whole segment vanishes.

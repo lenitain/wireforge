@@ -32,10 +32,15 @@ pub fn focal(px_h: f64, vfov: f64) -> f64 {
 /// coordinates at focal length `f`: the focal divide `[x, y] * f / z`, with
 /// no rotation, pan or roll — those are already in the point.
 ///
-/// This is what a clipped segment is drawn through, so the visible part
-/// keeps the position the vertex projection would have given it. The point
-/// must be in front of the camera plane (`z > NEAR`), which is what
-/// [`crate::raster::rasterize_camera_line`] guarantees when it calls this.
+/// The camera ROLL is not in the point ([`Camera::camera_space`] deliberately
+/// omits it, so near-plane clipping can happen first): a caller drawing a
+/// segment wants [`Camera::canvas_point`], which applies the roll and then
+/// hands back to this divide. This raw form is for code that has already
+/// rolled the point (or is testing the raster stage alone).
+///
+/// The point must be in front of the camera plane (`z > NEAR`), which is
+/// what [`crate::raster::rasterize_camera_line`] guarantees when it calls
+/// this.
 pub fn project_camera_point(p: [f64; 3], f: f64) -> (f64, f64) {
     (p[0] * f / p[2], p[1] * f / p[2])
 }
@@ -131,9 +136,15 @@ impl Camera {
     /// rotation, and `z` the depth in front of the camera (the `dist - rz`
     /// of [`Camera::project_full`], so `z <= NEAR` is behind the plane).
     ///
-    /// Canvas coordinates follow as `[x, y] * scale` — the [`focal`] length
-    /// of the grid. Callers that rasterize SEGMENTS rather than vertices
-    /// keep these points so they can clip at the near plane (see
+    /// Canvas coordinates follow as [`Camera::canvas_point`] — this point,
+    /// rolled about the panned pivot and divided by the depth. The roll is
+    /// deliberately NOT applied here: near-plane clipping needs the
+    /// un-rolled point (the roll leaves `z` untouched, so the two orders
+    /// agree), and a caller that draws this point raw would silently draw
+    /// an UNROLLED frame.
+    ///
+    /// Callers that rasterize SEGMENTS rather than vertices keep these
+    /// points so they can clip at the near plane (see
     /// [`crate::raster::rasterize_camera_line`]) instead of dropping a whole
     /// segment because one endpoint is behind the camera.
     pub fn camera_space(&self, p: (f64, f64, f64)) -> [f64; 3] {
@@ -143,6 +154,26 @@ impl Camera {
             rot[1][0] * p.0 + rot[1][1] * p.1 + rot[1][2] * p.2 + self.pan_y,
             self.dist - (rot[2][0] * p.0 + rot[2][1] * p.1 + rot[2][2] * p.2),
         ]
+    }
+
+    /// Canvas coordinates of a CAMERA-SPACE point (the step that
+    /// [`Camera::camera_space`] leaves out): roll about the panned pivot,
+    /// then the focal divide.
+    ///
+    /// This is the pipeline's tail — world rotation + pan (`camera_space`),
+    /// near-plane clip, **roll**, divide — and roll is the reason the two
+    /// halves exist: clipping needs the un-rolled point, drawing needs the
+    /// rolled one. Depth is unchanged by the roll, so a clipped segment
+    /// lands exactly where its unclipped form would have. Feeding it
+    /// `camera_space` output reproduces [`Camera::project_full`]'s
+    /// `px`/`py` to the bit, which is what keeps every segment the
+    /// rasterizer draws in step with the vertex projection.
+    pub fn canvas_point(&self, p: [f64; 3], f: f64) -> (f64, f64) {
+        let (sr, cr) = (self.roll_sin, self.roll_cos);
+        let (dx, dy) = (p[0] - self.pan_x, p[1] - self.pan_y);
+        let rx = self.pan_x + dx * cr - dy * sr;
+        let ry = self.pan_y + dx * sr + dy * cr;
+        (rx * f / p[2], ry * f / p[2])
     }
 
     /// Project one vertex into pre-allocated slots (for hot loops and rayon
@@ -636,6 +667,33 @@ mod tests {
             assert!((out[i][0] - rx * f / z).abs() < 1e-9, "px {i}");
             assert!((out[i][1] - ry * f / z).abs() < 1e-9, "py {i}");
         }
+    }
+
+    #[test]
+    fn camera_space_plus_canvas_point_reproduces_project_full() {
+        // The pipeline in two halves — `camera_space`, then the near-plane
+        // clip, then `canvas_point` — must land on the vertex projection's
+        // own screen coordinates, to the bit. A segment rasterizer draws
+        // from camera-space points, so a step missing between the halves
+        // (the camera roll once was) is invisible everywhere but here.
+        let cam = Camera::new(rot_axis([1.0, 2.0, 0.5], 37.0), 9.0, -0.9, 1.5, -2.5);
+        let f = focal(320.0, crate::geometry::DEFAULT_VFOV);
+        let mut checked = 0;
+        for p in points() {
+            let Some(q) = cam.project_full(p, f) else {
+                continue; // behind the camera: nothing to compare
+            };
+            let space = cam.camera_space(p);
+            assert_eq!(space[2], q.depth, "depth must be roll-invariant {p:?}");
+            let (x, y) = cam.canvas_point(space, f);
+            assert_eq!(x.to_bits(), q.px.to_bits(), "px {p:?}");
+            assert_eq!(y.to_bits(), q.py.to_bits(), "py {p:?}");
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "need at least one point in front of the camera"
+        );
     }
 
     #[test]

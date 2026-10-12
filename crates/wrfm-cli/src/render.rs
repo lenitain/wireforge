@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use wrfm_raster::Model;
 use wrfm_raster::geometry::{DEFAULT_VFOV, auto_dist, bounds, world_rot};
-use wrfm_raster::projection::{Camera, focal, project_camera_point};
+use wrfm_raster::projection::{Camera, focal};
 use wrfm_raster::raster::{Viewport, dots_to_lines, rasterize_camera_line};
 
 /// Camera distance used when `auto_dist=false` — the fork's default distance (no auto camera distance).
@@ -439,7 +439,9 @@ fn render_braille(m: &Model, g: &GeomParams) -> Vec<String> {
         rasterize_camera_line(
             cam.camera_space(m.vertices[a]),
             cam.camera_space(m.vertices[b]),
-            |p| project_camera_point(p, f),
+            // `canvas_point` rolls about the panned pivot before the divide:
+            // drawing the camera-space points raw would ignore `--roll`.
+            |p| cam.canvas_point(p, f),
             vp,
             |cell, bit| dots[cell] |= bit,
         );
@@ -1217,6 +1219,18 @@ mod tests {
         let text = render_to_text(&tetra(), &o);
         assert!(text.starts_with("[braille]\n"));
         assert!(text.contains("\n[ascii]\n"));
+    }
+
+    /// `--roll` reaches the frame only through `Camera::canvas_point` (the
+    /// frame is drawn from camera-space points), so a roll the frame ignores
+    /// would be a silently dropped flag.
+    #[test]
+    fn roll_turns_the_rendered_frame() {
+        let flat = render_to_text(&tetra(), &opts(Format::Braille, vec![]));
+        let mut rolled_opts = opts(Format::Braille, vec![]);
+        rolled_opts.roll_deg = 45.0;
+        let rolled = render_to_text(&tetra(), &rolled_opts);
+        assert_ne!(flat, rolled, "--roll 45 must turn the frame");
     }
 
     #[test]

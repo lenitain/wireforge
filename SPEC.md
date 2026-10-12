@@ -188,7 +188,7 @@ Same turns, but around the model's own frame: `Ctrl+h` yaws it to *its* left.
 
 | Key        | Action                              |
 | :--------- | :---------------------------------- |
-| `c`        | reset the view                      |
+| `r`        | reset the view                      |
 
 #### Session
 

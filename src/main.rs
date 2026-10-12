@@ -369,7 +369,7 @@ const BINDINGS: &[Binding] = &[
     Binding {
         action: Action::Reset,
         group: Group::Frame,
-        chords: &[key(KeyCode::Char('c'))],
+        chords: &[key(KeyCode::Char('r'))],
     },
     // --- Session ---
     Binding {
@@ -832,7 +832,7 @@ const HELP_RIGHT: &[HelpGroup] = &[
             HelpRow("Ctrl+f", "roll clockwise"),
         ],
     ),
-    HelpGroup("FRAME", &[HelpRow("c", "reset the view")]),
+    HelpGroup("FRAME", &[HelpRow("r", "reset the view")]),
     HelpGroup(
         "SESSION",
         &[
@@ -2543,8 +2543,8 @@ mod tests {
                 Some(Action::Motion(Motion::MoveBack)),
             ),
             (
-                "c resets the view",
-                Char('c'),
+                "r resets the view",
+                Char('r'),
                 KeyModifiers::NONE,
                 Some(Action::Reset),
             ),
@@ -3399,10 +3399,10 @@ mod tests {
         // The pan/zoom step is the cached extent, not a per-frame scan.
         assert_eq!(app.move_scale(), app.extent);
 
-        // Key `c` re-fits from the cache too, rather than a fresh bounds scan.
+        // Key `r` re-fits from the cache too, rather than a fresh bounds scan.
         app.view.dist = 1234.0;
         app.handle_input(Event::Key(KeyEvent::new(
-            KeyCode::Char('c'),
+            KeyCode::Char('r'),
             KeyModifiers::NONE,
         )));
         assert_eq!(
@@ -3910,7 +3910,7 @@ mod tests {
             (Esc, Action::Quit),
             (Char(' '), Action::Spin),
             (Tab, Action::Axes),
-            (Char('c'), Action::Reset),
+            (Char('r'), Action::Reset),
             (Char('d'), Action::Motion(Motion::RollMinus)),
             (Char('f'), Action::Motion(Motion::RollPlus)),
             (Char('h'), Action::Motion(Motion::YawLeft)),
@@ -3924,15 +3924,15 @@ mod tests {
             assert_eq!(action, expected, "{code:?}");
         }
     }
-    /// `r` and `e` gave their keys to `d`/`f`; nothing — plain or with Ctrl —
-    /// may fire from them any more.
+    /// `c` and `e` are no longer bound: `c` gave its key to the `r` reset, and
+    /// `e` gave its key to `d`/`f`. Nothing — plain or with Ctrl — may fire
+    /// from them any more. (Ctrl+C still quits; the plain `r` now resets.)
     #[test]
-    fn r_and_e_are_unbound() {
+    fn c_and_e_are_unbound() {
         use KeyCode::*;
         for (code, mods) in [
-            (Char('r'), KeyModifiers::NONE),
+            (Char('c'), KeyModifiers::NONE),
             (Char('e'), KeyModifiers::NONE),
-            (Char('r'), KeyModifiers::CONTROL),
             (Char('e'), KeyModifiers::CONTROL),
         ] {
             assert!(

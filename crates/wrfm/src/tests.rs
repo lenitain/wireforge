@@ -684,7 +684,7 @@ fn shortest_roundtrip_serialized() {
 /// the magic line's leftovers and the file stops parsing at all.
 ///
 /// Deterministic tripwire for the reuse design: the mutation that drops
-/// `out.clear()` fails here. `parse::tokenize_tests` pins the same invariant at
+/// `out.clear()` fails here. `parse::parser_unit_tests` pins the same invariant at
 /// the function level, where the failure is a quietly wrong token instead.
 #[test]
 fn token_buffer_is_cleared_between_lines() {
@@ -707,6 +707,30 @@ fn token_buffer_is_cleared_between_lines() {
             );
         }
         other => panic!("a two-coordinate `v` line must be rejected: {other:?}"),
+    }
+}
+
+/// A header may declare far more items than the file contains; the counts are
+/// only checked at the end. Reserving on them is therefore capped by the input
+/// length, so a fabricated header stays a cheap parse error rather than a huge
+/// allocation.
+#[test]
+fn fabricated_header_does_not_drive_a_huge_allocation() {
+    let text = "wrfm 2\nvertices 999999999   edges 999999999\n\nv 0 0 0\nv 1 1 1\n\ne 0 1\n";
+    assert!(
+        text.len() < 100,
+        "the point is a tiny file with an absurd header: {} bytes",
+        text.len()
+    );
+
+    match WrfmModel::from_str("m", text) {
+        Err(ParseError::CountMismatch {
+            which, declared, ..
+        }) => {
+            assert_eq!(which, CountKind::Vertices);
+            assert_eq!(declared, 999_999_999);
+        }
+        other => panic!("an over-declared header must be a count mismatch: {other:?}"),
     }
 }
 

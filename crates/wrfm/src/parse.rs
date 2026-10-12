@@ -166,6 +166,14 @@ impl WrfmModel {
                 header_col = dcol;
                 header_text = raw_line.to_string();
                 seen_header = true;
+                reserve_for_declared_counts(
+                    &mut model.vertices,
+                    &mut model.edges,
+                    &mut edge_meta,
+                    declared_vertices,
+                    declared_edges,
+                    source.len(),
+                );
                 continue;
             }
 
@@ -421,6 +429,39 @@ fn malformed_header_location(toks: &[(&str, usize)]) -> (usize, String) {
     (toks[0].1, toks[0].0.to_string())
 }
 
+/// Reserve room for the counts the header declares, so the model `Vec`s stop
+/// doubling from zero (a 1M-edge file reallocated 36 times and copied 84 MB).
+///
+/// The declared counts are only trustworthy once the file has been parsed, and
+/// until then a header can claim anything. Both are therefore capped against
+/// the input length: every item needs at least a few bytes of text, so a file
+/// cannot honestly declare more items than `len / 4`. A fabricated header adds
+/// nothing beyond what the bytes on disk could hold.
+///
+/// Under-reserving is free: the `Vec`s still grow on their own, and the count
+/// checks at the end reject a file whose header and body disagree. Over-
+/// reserving is what the cap prevents.
+///
+/// `edge_meta` grows in lockstep with `edges` (both are pushed together under
+/// the same `declared_edges` check), so the declared count bounds it exactly.
+fn reserve_for_declared_counts(
+    vertices: &mut Vec<(f64, f64, f64)>,
+    edges: &mut Vec<(usize, usize)>,
+    edge_meta: &mut Vec<(usize, usize, usize, core::ops::Range<usize>)>,
+    declared_vertices: usize,
+    declared_edges: usize,
+    source_len: usize,
+) {
+    // `max(1)` keeps the cap from being 0 for a tiny file, which would reserve
+    // nothing and leave the common `v`-only model growing as before.
+    let ceiling = (source_len / 4).max(1);
+    let want_vertices = declared_vertices.min(ceiling);
+    let want_edges = declared_edges.min(ceiling);
+    vertices.reserve(want_vertices.saturating_sub(vertices.len()));
+    edges.reserve(want_edges.saturating_sub(edges.len()));
+    edge_meta.reserve(want_edges.saturating_sub(edge_meta.len()));
+}
+
 /// Split a line into `(token, 1-based char column)` pairs, ignoring surrounding whitespace.
 ///
 /// `out` is caller-owned and cleared first, so one buffer serves every line of
@@ -451,9 +492,8 @@ fn tokenize<'a>(line: &'a str, out: &mut Vec<(&'a str, usize)>) {
 }
 
 #[cfg(test)]
-mod tokenize_tests {
+mod parser_unit_tests {
     use super::*;
-
     /// A shared buffer must be indistinguishable from a fresh one per line.
     ///
     /// This is the differential guard for the whole reuse design: `tokenize` is
@@ -516,5 +556,63 @@ mod tokenize_tests {
             "é is 2 bytes, so the next token starts at char 3"
         );
         assert_eq!(out[2], ("1", 5));
+    }
+
+    /// The declared counts are capped by the input length, so a fabricated
+    /// header cannot ask for a reserve larger than the text could hold.
+    #[test]
+    fn reserved_capacity_is_capped_by_input_length() {
+        // 400 bytes of text can hold at most 100 items, whatever the header says.
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        reserve_for_declared_counts(
+            &mut vertices,
+            &mut edges,
+            &mut Vec::new(),
+            999_999_999,
+            999_999_999,
+            400,
+        );
+        assert!(
+            vertices.capacity() <= 100,
+            "vertices reserved {} for 400 bytes",
+            vertices.capacity()
+        );
+        assert!(
+            edges.capacity() <= 100,
+            "edges reserved {} for 400 bytes",
+            edges.capacity()
+        );
+    }
+
+    /// A header that under-declares still gets its declared room, and a header
+    /// that over-declares within the cap gets exactly what it asked for.
+    #[test]
+    fn reserved_capacity_uses_the_declared_counts() {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        reserve_for_declared_counts(
+            &mut vertices,
+            &mut edges,
+            &mut Vec::new(),
+            1_000,
+            2_000,
+            8_000_000,
+        );
+        // `reserve` may round up; the point is that growth from zero is gone.
+        assert!(vertices.capacity() >= 1_000);
+        assert!(edges.capacity() >= 2_000);
+        assert!(vertices.capacity() < 2_000, "no gross overshoot");
+    }
+
+    /// A one-byte file still reserves something, so the common small model is
+    /// not left doubling from zero.
+    #[test]
+    fn reserved_capacity_never_asks_for_zero_on_a_tiny_file() {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        reserve_for_declared_counts(&mut vertices, &mut edges, &mut Vec::new(), 8, 12, 3);
+        assert!(vertices.capacity() >= 1);
+        assert!(edges.capacity() >= 1);
     }
 }

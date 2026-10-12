@@ -153,23 +153,23 @@ Left and right read as you see them: the model faces out of the screen, so
 
 | Key                       | Action                              |
 | :------------------------ | :---------------------------------- |
-| `h` / `Left`              | Yaw left                            |
-| `l` / `Right`             | Yaw right                           |
-| `k` / `Up`                | Pitch up                            |
-| `j` / `Down`              | Pitch down                          |
-| `d`                       | Roll anticlockwise (view axis)      |
-| `f`                       | Roll clockwise (view axis)          |
+| `h` / `Left`              | yaw left                            |
+| `l` / `Right`             | yaw right                           |
+| `k` / `Up`                | pitch up                            |
+| `j` / `Down`              | pitch down                          |
+| `d`                       | roll anticlockwise                  |
+| `f`                       | roll clockwise                      |
 
 #### Move — the world's plane
 
 | Key                            | Action                              |
 | :----------------------------- | :---------------------------------- |
-| `Shift+h` / `Shift+Left`       | Pan left                            |
-| `Shift+l` / `Shift+Right`      | Pan right                           |
-| `Shift+k` / `Shift+Up`         | Pan up                              |
-| `Shift+j` / `Shift+Down`       | Pan down                            |
-| `=` / `+`                      | Dolly nearer                        |
-| `-` / `_`                      | Dolly farther                       |
+| `Shift+h` / `Shift+Left`       | pan left                            |
+| `Shift+l` / `Shift+Right`      | pan right                           |
+| `Shift+k` / `Shift+Up`         | pan up                              |
+| `Shift+j` / `Shift+Down`       | pan down                            |
+| `=` / `+`                      | dolly nearer                        |
+| `-` / `_`                      | dolly farther                       |
 
 #### Rotate — the model's own axes
 
@@ -177,27 +177,27 @@ Same turns, but around the model's own frame: `Ctrl+h` yaws it to *its* left.
 
 | Key                              | Action                              |
 | :------------------------------- | :---------------------------------- |
-| `Ctrl+h` / `Ctrl+Left`           | Yaw to its own left                 |
-| `Ctrl+l` / `Ctrl+Right`          | Yaw to its own right                |
-| `Ctrl+k` / `Ctrl+Up`             | Pitch up                            |
-| `Ctrl+j` / `Ctrl+Down`           | Pitch down                          |
-| `Ctrl+d`                         | Roll to its own left                |
-| `Ctrl+f`                         | Roll to its own right               |
+| `Ctrl+h` / `Ctrl+Left`           | yaw left                            |
+| `Ctrl+l` / `Ctrl+Right`          | yaw right                           |
+| `Ctrl+k` / `Ctrl+Up`             | pitch up                            |
+| `Ctrl+j` / `Ctrl+Down`           | pitch down                          |
+| `Ctrl+d`                         | roll anticlockwise                  |
+| `Ctrl+f`                         | roll clockwise                      |
 
 #### Frame — where the model sits on screen
 
 | Key        | Action                              |
 | :--------- | :---------------------------------- |
-| `c`        | Reset rotation, pan and distance    |
+| `c`        | reset the view                      |
 
 #### Session
 
 | Key                       | Action                              |
 | :------------------------ | :---------------------------------- |
-| `Space`                   | Toggle automatic spinning           |
-| `Tab` / `Shift+Tab`       | Toggle the XYZ axes                 |
-| `?`                       | Toggle the key help overlay         |
-| `q` / `Esc` / `Ctrl+c`    | Quit the application                |
+| `Space`                   | toggle spinning                     |
+| `Tab` / `Shift+Tab`       | toggle the axes                     |
+| `?`                       | toggle this help                    |
+| `q` / `Esc` / `Ctrl+c`    | quit                                |
 
 The help overlay lists every binding, grouped the same way.
 

@@ -213,9 +213,8 @@ enum Group {
 /// separately by `resolve_key_event_folds_both_terminal_encodings`.
 ///
 /// `label` follows one convention everywhere: modifiers in `Ctrl+Shift+`
-/// order, then the key — lower-case for a bare letter (`h`), upper-case when
-/// SHIFT is part of the chord (`Shift+H`), verbatim for named keys
-/// (`Left`, `Space`, `Tab`).
+/// order, then the key — the lowercase form of a letter (`h`, `Shift+h`,
+/// `Ctrl+h`), verbatim for named keys (`Left`, `Space`, `Tab`).
 /// A chord is plain data, small enough to copy: the compile-time keymap
 /// indexes chords by value.
 #[derive(Clone, Copy)]
@@ -410,9 +409,10 @@ const BINDINGS: &[Binding] = &[
 impl Chord {
     /// The label as shown to the operator, derived from the chord itself so
     /// it can never disagree with the key it names. Modifiers come first in
-    /// `Ctrl+Shift+` order, then the key: lower-case for a bare letter (`h`),
-    /// upper-case when SHIFT is part of the chord (`Shift+H`), a plain glyph
-    /// for symbols, and the key's name for named keys (`Space`, `Left`).
+    /// `Ctrl+Shift+` order, then the key: the letter is always the key's
+    /// own lowercase form (`h`, `Shift+h`, `Ctrl+h`) because the chord names
+    /// the key, not the shifted glyph — a plain glyph for symbols, and the
+    /// key's name for named keys (`Space`, `Left`).
     fn label(&self) -> String {
         let mut out = String::new();
         if self.mods.contains(KeyModifiers::CONTROL) {
@@ -423,7 +423,17 @@ impl Chord {
         }
         match self.code {
             KeyCode::Char(' ') => out.push_str("Space"),
-            KeyCode::Char(c) => out.push(c),
+            KeyCode::Char(c) => {
+                // SHIFT is in the chord; the chord names the key, not the
+                // glyph. `H` in BINDINGS is the identity form `canonical_key`
+                // already folds to `h`; the label spells the lowercase so a
+                // row of `h/l/k/j` reads as keys.
+                if self.mods.contains(KeyModifiers::SHIFT) && c.is_ascii_uppercase() {
+                    out.push(c.to_ascii_lowercase());
+                } else {
+                    out.push(c);
+                }
+            }
             KeyCode::Esc => out.push_str("Esc"),
             KeyCode::Tab => out.push_str("Tab"),
             // BackTab IS Shift+Tab; spelling the modifier again would double it.
@@ -785,7 +795,7 @@ struct HelpGroup(&'static str, &'static [HelpRow]);
 /// The overlay's left column: Rotate and Move, the world-frame pair.
 const HELP_LEFT: &[HelpGroup] = &[
     HelpGroup(
-        "ROTATE  world axes",
+        "ROTATE  world",
         &[
             HelpRow("h", "yaw left"),
             HelpRow("l", "yaw right"),
@@ -796,12 +806,12 @@ const HELP_LEFT: &[HelpGroup] = &[
         ],
     ),
     HelpGroup(
-        "MOVE  world axes",
+        "MOVE  world",
         &[
-            HelpRow("Shift+H", "pan left"),
-            HelpRow("Shift+L", "pan right"),
-            HelpRow("Shift+K", "pan up"),
-            HelpRow("Shift+J", "pan down"),
+            HelpRow("Shift+h", "pan left"),
+            HelpRow("Shift+l", "pan right"),
+            HelpRow("Shift+k", "pan up"),
+            HelpRow("Shift+j", "pan down"),
             HelpRow("=", "dolly nearer"),
             HelpRow("-", "dolly farther"),
         ],
@@ -812,14 +822,14 @@ const HELP_LEFT: &[HelpGroup] = &[
 /// so it sits opposite it; Frame and Session are short and stack under it.
 const HELP_RIGHT: &[HelpGroup] = &[
     HelpGroup(
-        "ROTATE  the model's own axes",
+        "ROTATE  model",
         &[
-            HelpRow("Ctrl+h", "yaw to its own left"),
-            HelpRow("Ctrl+l", "yaw to its own right"),
+            HelpRow("Ctrl+h", "yaw left"),
+            HelpRow("Ctrl+l", "yaw right"),
             HelpRow("Ctrl+k", "pitch up"),
             HelpRow("Ctrl+j", "pitch down"),
-            HelpRow("Ctrl+d", "roll to its own left"),
-            HelpRow("Ctrl+f", "roll to its own right"),
+            HelpRow("Ctrl+d", "roll anticlockwise"),
+            HelpRow("Ctrl+f", "roll clockwise"),
         ],
     ),
     HelpGroup("FRAME", &[HelpRow("c", "reset the view")]),
@@ -827,7 +837,7 @@ const HELP_RIGHT: &[HelpGroup] = &[
         "SESSION",
         &[
             HelpRow("Space", "toggle spinning"),
-            HelpRow("Tab", "toggle the XYZ axes"),
+            HelpRow("Tab", "toggle the axes"),
             HelpRow("?", "toggle this help"),
             HelpRow("q", "quit"),
         ],
@@ -908,6 +918,82 @@ fn build_help_lines() -> Vec<Line<'static>> {
     out
 }
 
+/// The panel's chrome — how much space the borders and padding eat around
+/// the content. The natural panel wears a rounded border plus 2 chars of
+/// padding on each side; chrome shrinks as the terminal narrows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HelpChrome {
+    /// Borders + 2 chars of padding on each side (the default look).
+    Full,
+    /// Borders + 1 char of padding on each side.
+    Padded,
+    /// Borders only, no padding.
+    Bare,
+    /// No borders, no padding — content uses every column.
+    Inline,
+}
+
+/// Pick the chrome that lets the content fit in `term_w`: start from `Full` and
+/// shrink padding, then drop borders, until the content's widest row plus the
+/// chrome fits. The terminal `term_w` is the screen width the panel lives in.
+fn help_chrome(widest: u16, term_w: u16) -> HelpChrome {
+    let fits = |chrome_w: u16| widest + chrome_w <= term_w;
+    if fits(6) {
+        HelpChrome::Full
+    } else if fits(4) {
+        HelpChrome::Padded
+    } else if fits(2) {
+        HelpChrome::Bare
+    } else {
+        HelpChrome::Inline
+    }
+}
+
+impl HelpChrome {
+    /// Cols the chrome eats horizontally (borders + padding, both sides).
+    fn width(self) -> u16 {
+        match self {
+            HelpChrome::Full => 6,
+            HelpChrome::Padded => 4,
+            HelpChrome::Bare => 2,
+            HelpChrome::Inline => 0,
+        }
+    }
+
+    /// Rows the chrome eats vertically (borders only; padding is horizontal).
+    fn height(self) -> u16 {
+        match self {
+            HelpChrome::Full | HelpChrome::Padded | HelpChrome::Bare => 2,
+            HelpChrome::Inline => 0,
+        }
+    }
+
+    /// Whether to draw the rounded border. Padding is rendered inside it.
+    fn borders(self) -> Borders {
+        match self {
+            HelpChrome::Inline => Borders::NONE,
+            _ => Borders::ALL,
+        }
+    }
+
+    /// Chars of padding on each side. `0` means tight to the border (or the
+    /// edge, when there is no border).
+    fn padding(self) -> u16 {
+        match self {
+            HelpChrome::Full => 2,
+            HelpChrome::Padded => 1,
+            _ => 0,
+        }
+    }
+
+    /// The total panel width for `widest` content inside `term_w`. The panel
+    /// uses whatever horizontal space the chrome leaves, so the content can
+    /// reach the right edge of the screen instead of clipping at the panel.
+    fn panel_width(self, widest: u16, term_w: u16) -> u16 {
+        (widest + self.width()).min(term_w)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The statusline (the last row)
 // ---------------------------------------------------------------------------
@@ -920,7 +1006,7 @@ fn build_help_lines() -> Vec<Line<'static>> {
 /// and `a` sections.
 const STRIP: Color = Color::Black; // ANSI 0 — ink, and the full-width ground
 const LAMP: Color = Color::DarkGray; // ANSI 8 — one step lighter
-const ACCENT: Color = Color::Green; // ANSI 2 — the model-name pill
+const ACCENT: Color = Color::Green; // ANSI 2 — the pill, the lit lamps, the keys
 const BODY: Color = Color::White; // ANSI 7 — text on a block
 
 /// The filled wedge that *closes* a block (U+E0B0): its ink is the block's own
@@ -929,16 +1015,23 @@ const WEDGE_CLOSE: char = '\u{e0b0}';
 /// The filled wedge that *opens* a block (U+E0B2): same ink, but the point
 /// faces left, so the block arrives out of the ground it sits on.
 const WEDGE_OPEN: char = '\u{e0b2}';
-/// The thin divider between two items of one block (U+E0B1).
-const ITEM_DIVIDER: char = '\u{e0b1}';
+/// The thin seam between two items of one block (U+E0B1): its point faces
+/// right, the way a left-hand block wedges.
+const ITEM_DIVIDER_CLOSE: char = '\u{e0b1}';
+/// The same seam with its point facing left (U+E0B3): the way a right-hand
+/// block wedges.
+const ITEM_DIVIDER_OPEN: char = '\u{e0b3}';
 /// Strip cells kept between the left blocks and the right-hand hints, so the
 /// two never fuse into one long bar.
 const MIN_GAP: usize = 2;
 
 /// One item on the statusline: runs of text, each in its own ink, all drawn on
-/// the section's ground. A lamp spends two runs so that its dot can carry the
-/// state while its label stays readable — an unlit lamp dims its *dot*, not the
-/// word naming it.
+/// the section's ground. Two runs are what let one item name two things: a
+/// lamp spends its two on a dot that carries the state and a label that stays
+/// readable — an unlit lamp dims its *dot*, not the word naming it — and a
+/// hint spends its two on the key and its verb, so "Space spin" reads as a
+/// chord and an action rather than as one phrase (the split the overlay draws
+/// between its chord and doc columns).
 struct Item {
     runs: Vec<(String, Color)>,
 }
@@ -990,10 +1083,13 @@ fn modifier_hint(mods: KeyModifiers) -> Vec<Item> {
             .map(chord_key)
             .collect();
         if !keys.is_empty() {
-            items.push(Item::plain(
-                format!("{name}{} {}", keys.join("/"), group_verb(group)),
-                BODY,
-            ));
+            // The same key / verb split as the everyday hints.
+            items.push(Item {
+                runs: vec![
+                    (format!("{name}{}", keys.join("/")), ACCENT),
+                    (format!(" {}", group_verb(group)), BODY),
+                ],
+            });
         }
     }
     items
@@ -1012,26 +1108,31 @@ fn group_verb(g: Group) -> &'static str {
     }
 }
 
-/// The key half of a chord's label, lower-cased when it is a single letter:
-/// `Shift+H` reads as `h`, so a row of keys looks like keys instead of like
-/// shouting.
+/// The key half of a chord's label, as `Chord::label` already spelled it:
+/// the same case shows up in the help overlay and the statusline so a reader
+/// never has to remember which surface uses which shape.
 fn chord_key(c: &Chord) -> String {
     let label = c.label();
-    let key = ["Ctrl+", "Shift+"]
+    ["Ctrl+", "Shift+"]
         .iter()
         .find_map(|prefix| label.strip_prefix(prefix))
-        .unwrap_or(&label);
-    if key.chars().count() == 1 {
-        key.to_lowercase()
-    } else {
-        key.to_string()
-    }
+        .unwrap_or(&label)
+        .to_string()
+}
+
+/// Which end of the strip a section sits at, and so which way its seams point:
+/// a left-hand block reads left to right and wedges rightwards, while the
+/// right-hand hints read right to left and wedge leftwards.
+enum Side {
+    Left,
+    Right,
 }
 
 /// A run of items sharing one ground — lualine's `a` / `b` / `c` section.
 struct Section {
     items: Vec<Item>,
     ground: Color,
+    side: Side,
 }
 
 impl Section {
@@ -1049,8 +1150,13 @@ impl Section {
     /// Append the section to `spans`, wedging out of `behind` and into `ahead`.
     fn push(&self, spans: &mut Vec<Span<'static>>, behind: Color, ahead: Color) {
         // A divider is inked one step off its own ground, so it reads as a
-        // seam rather than as one more glyph.
+        // seam rather than as one more glyph, and it points the way its side
+        // of the strip reads.
         let divider = if self.ground == STRIP { LAMP } else { STRIP };
+        let seam = match self.side {
+            Side::Left => ITEM_DIVIDER_CLOSE,
+            Side::Right => ITEM_DIVIDER_OPEN,
+        };
         let glyph = |ch: char, fg: Color, bg: Color| {
             Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg))
         };
@@ -1063,7 +1169,7 @@ impl Section {
         }
         for (i, item) in self.items.iter().enumerate() {
             if i > 0 {
-                spans.push(glyph(ITEM_DIVIDER, divider, self.ground));
+                spans.push(glyph(seam, divider, self.ground));
             }
             let first = item.runs.first().map_or(BODY, |(_, ink)| *ink);
             pad(spans, first);
@@ -1142,7 +1248,12 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
             // The canonical chord only: aliases would double the width of a
             // row that is always on screen, and the overlay names the same
             // chord once.
-            Item::plain(format!("{} {label}", b.chords[0].label()), BODY)
+            //
+            // The key takes the accent and the verb the body ink, so the two
+            // are told apart by colour and not only by the space between them.
+            Item {
+                runs: vec![(b.chords[0].label(), ACCENT), (format!(" {label}"), BODY)],
+            }
         })
     };
     // A lamp is a filled dot whose ink carries the state; the label keeps the
@@ -1171,6 +1282,7 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
     let lamps = Section {
         items: vec![lamp(app.auto_spin, "SPIN"), lamp(app.show_axes, "AXES")],
         ground: LAMP,
+        side: Side::Left,
     };
     let lamps_width = lamps.width(LAMP, STRIP);
 
@@ -1229,6 +1341,7 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
     let pill = Section {
         items: vec![Item::plain(label, STRIP)],
         ground: ACCENT,
+        side: Side::Left,
     };
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(hints.len() * 2 + 6);
     // The pill starts flush at the left edge — nothing precedes it to wedge out
@@ -1246,6 +1359,7 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
         Section {
             items: hints,
             ground: LAMP,
+            side: Side::Right,
         }
         .push(&mut spans, STRIP, LAMP);
     }
@@ -1735,23 +1849,27 @@ fn compose_frame(app: &mut App, engine: &mut Engine) {
     let panel = if overlay {
         // Help panel: centred over the canvas, not a full-screen takeover.
         let lines = help_lines();
-        let inner_w = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
-        let inner_h = lines.len() as u16 + 2; // +2 for the rounded border
-        // Fall back to the whole canvas when the terminal is too small to
-        // centre in; the text then clips at the panel edge rather than
-        // silently vanishing, which is the honest failure.
+        let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+        // Pick the chrome that lets the content fit: shrink padding, then
+        // drop borders, until the panel's chrome-plus-content width is no
+        // wider than the terminal. The rightmost cell of the overlay then
+        // sits inside the screen instead of clipping at the panel edge.
+        let chrome = help_chrome(widest, w16);
+        let panel_w = chrome.panel_width(widest, w16);
+        let panel_h = lines.len() as u16 + chrome.height();
         let mut area = Rect {
             x: 0,
             y: canvas_top,
-            width: w16.min(inner_w.max(8)),
-            height: canvas_h.min(inner_h.max(3)),
+            width: panel_w,
+            height: canvas_h.min(panel_h.max(3)),
         };
         area.x = (w16.saturating_sub(area.width)) / 2;
         area.y = canvas_top + (canvas_h.saturating_sub(area.height)) / 2;
+        let pad = chrome.padding();
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(chrome.borders())
             .border_type(BorderType::Rounded)
-            .padding(Padding::new(2, 2, 0, 0));
+            .padding(Padding::new(pad, pad, 0, 0));
         let inner = block.inner(area);
         let hud = engine.hud_buf.as_mut().unwrap();
         block.render(area, hud);
@@ -2506,8 +2624,9 @@ mod tests {
                 if let (Some(cs), Some(sc)) = (ctrl_at, shift_at) {
                     assert!(cs < sc, "{l}: Ctrl must come before Shift");
                 }
-                // A lower-case letter after Shift+ would mean the modifier is
-                // claimed but the glyph is not shifted. Named keys (`Left`,
+                // The chord names the key, not the shifted glyph: after
+                // `Shift+` a single letter is the lowercase form (`Shift+h`),
+                // the same way `h` and `Ctrl+h` read. Named keys (`Left`,
                 // `Tab`) have no glyph to case, so only single letters check.
                 if let Some([c]) = l.strip_prefix("Shift+").and_then(|r| {
                     let mut it = r.chars();
@@ -2517,8 +2636,8 @@ mod tests {
                     }
                 }) {
                     assert!(
-                        c.is_uppercase() || !c.is_alphabetic(),
-                        "{l}: Shift+ must be followed by the shifted glyph"
+                        c.is_lowercase() || !c.is_alphabetic(),
+                        "{l}: Shift+ must be followed by the key's lowercase letter"
                     );
                 }
             }
@@ -2562,6 +2681,43 @@ mod tests {
             "overlay is {} lines tall (budget 22)",
             help_lines().len()
         );
+    }
+
+    #[test]
+    fn help_panel_chrome_shrinks_with_terminal_width() {
+        // The chrome (borders + padding) shrinks when the terminal narrows,
+        // so the rightmost cell of the overlay stays on screen rather than
+        // clipping at the panel edge. Widest help line is ~59 chars, so:
+        //   wide (80..65): Full (6 chrome) — natural panel, centred
+        //   64..63:         Padded (4) — 1 each side
+        //   62..61:         Bare (2) — borders only
+        //   60..59:         Inline (0) — borders dropped so content fills screen
+        //   58:             Inline — content itself clips (terminal < widest)
+        let widest = help_lines().iter().map(Line::width).max().unwrap_or(0) as u16;
+        assert_eq!(help_chrome(widest, 80), HelpChrome::Full);
+        assert_eq!(help_chrome(widest, 65), HelpChrome::Full);
+        assert_eq!(help_chrome(widest, 64), HelpChrome::Padded);
+        assert_eq!(help_chrome(widest, 63), HelpChrome::Padded);
+        assert_eq!(help_chrome(widest, 62), HelpChrome::Bare);
+        assert_eq!(help_chrome(widest, 61), HelpChrome::Bare);
+        assert_eq!(help_chrome(widest, 60), HelpChrome::Inline);
+        assert_eq!(help_chrome(widest, 59), HelpChrome::Inline);
+    }
+
+    #[test]
+    fn help_panel_inner_never_exceeds_terminal() {
+        // The whole point of the chrome dance: the inner area the lines are
+        // rendered into must never spill past the right edge of the screen,
+        // so the overlay can't truncate mid-word regardless of terminal width.
+        let widest = help_lines().iter().map(Line::width).max().unwrap_or(0) as u16;
+        for term_w in [80, 70, 65, 64, 63, 62, 61, 60, 59, 58, 50] {
+            let chrome = help_chrome(widest, term_w);
+            let panel_w = chrome.panel_width(widest, term_w);
+            assert!(
+                panel_w <= term_w,
+                "panel {panel_w} exceeds terminal {term_w}"
+            );
+        }
     }
 
     #[test]

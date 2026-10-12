@@ -678,6 +678,38 @@ fn shortest_roundtrip_serialized() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The parse loop reuses ONE token buffer for every line (`parse.rs::tokenize`
+/// clears it before writing). The magic line is tokenized into that same buffer
+/// before the header line is read, so a missing `clear()` makes the header see
+/// the magic line's leftovers and the file stops parsing at all.
+///
+/// Deterministic tripwire for the reuse design: the mutation that drops
+/// `out.clear()` fails here. `parse::tokenize_tests` pins the same invariant at
+/// the function level, where the failure is a quietly wrong token instead.
+#[test]
+fn token_buffer_is_cleared_between_lines() {
+    let text = v2(3, 0, "# pad # pad # pad # pad\nv 0 0 0 # pad\nv 0 0\n");
+    assert_eq!(
+        text.lines().nth(5).map(|l| l.split_whitespace().count()),
+        Some(3),
+        "line 6 must be a short `v` line: {text}"
+    );
+
+    // A `v` line with two coordinates must be rejected on its own terms,
+    // reporting the axis it is actually missing rather than a token carried
+    // over from the longer line above it.
+    match WrfmModel::from_str("m", &text) {
+        Err(ParseError::InvalidVertex { line, detail, .. }) => {
+            assert_eq!(
+                (line, detail),
+                (6, VertexError::MissingCoordinate { axis: 'z' }),
+                "the short `v` line on line 6 must be reported as-is"
+            );
+        }
+        other => panic!("a two-coordinate `v` line must be rejected: {other:?}"),
+    }
+}
+
 #[test]
 fn saved_file_is_canonical_v2() {
     let mut model = WrfmModel::new("cube");

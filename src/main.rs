@@ -652,7 +652,12 @@ fn ensure_keyboard_terminal() -> Result<(), String> {
 /// Probe a byte buffer: `.wrfm` magic passes, OBJ content gets a pointer
 /// to the converter, everything else is unrecognized. The magic always
 /// wins (obj-looking markers later in the head do not matter).
+///
+/// Only the first [`PROBE_BYTES`] bytes — the head — are examined: the
+/// format is decided where a file decides it, so a 90 MB stdin buffer is
+/// never scanned (or re-validated as UTF-8) just to classify it.
 fn probe_bytes(buf: &[u8]) -> Result<(), String> {
+    let buf = &buf[..PROBE_BYTES.min(buf.len())];
     // Lossy: a stray non-UTF-8 byte must never decide the format.
     let head = String::from_utf8_lossy(buf);
     // Strip a leading BOM like the wrfm parser does, so a BOM before the
@@ -701,21 +706,25 @@ fn looks_like_obj(head: &str) -> bool {
     has_obj_marker || (has_vertex && !has_wrfm_edge)
 }
 
-/// Probe the file's content; errors are path-prefixed.
-fn probe_format(target_file: &Path) -> Result<(), String> {
-    let mut buf = [0u8; PROBE_BYTES];
-    let mut file = std::fs::File::open(target_file)
-        .map_err(|e| format!("cannot open '{}': {e}", target_file.display()))?;
-    let n = file
-        .read(&mut buf)
+/// Read `target_file` once and probe its head as `.wrfm`; errors are
+/// path-prefixed. The returned text is what the parser sees — the path is
+/// opened exactly once, so probe and parse can never disagree about bytes.
+fn read_probed_file(target_file: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(target_file)
         .map_err(|e| format!("cannot read '{}': {e}", target_file.display()))?;
-    probe_bytes(&buf[..n]).map_err(|e| format!("'{}': {e}", target_file.display()))
+    probe_bytes(&bytes).map_err(|e| format!("'{}': {e}", target_file.display()))?;
+    String::from_utf8(bytes)
+        .map_err(|e| format!("'{}': not valid UTF-8: {e}", target_file.display()))
 }
 
-/// Validate the stream as `.wrfm`, then parse the file.
+/// Parse the file that [`read_probed_file`] already read and checked.
 fn load_model(target_file: &Path) -> Result<(Model, String), String> {
-    probe_format(target_file)?;
-    let wrfm_data = WrfmModel::from_file(target_file).map_err(|e| e.to_string())?;
+    let text = read_probed_file(target_file)?;
+    let name = target_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Unknown");
+    let wrfm_data = WrfmModel::from_str(name, &text).map_err(|e| e.to_string())?;
     let model = Model {
         vertices: wrfm_data.vertices,
         edges: wrfm_data.edges,
@@ -2172,7 +2181,7 @@ mod tests {
         // Real OBJ content: the probe points at `wrfm convert` and loading
         // fails with the same hint — never a silent empty model.
         let p = temp_file("cube.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
-        let err = probe_format(&p).unwrap_err();
+        let err = read_probed_file(&p).unwrap_err();
         assert!(err.contains("wrfm convert"), "hint: {err}");
         let err = load_model(&p).expect_err("obj file must not load");
         assert!(err.contains("wrfm convert"), "error: {err}");
@@ -2183,7 +2192,7 @@ mod tests {
         // A file with only `v ` lines (no `e `) is an OBJ point cloud:
         // v-only is an obj marker, not a wrfm without the magic.
         let p = temp_wrfm("vertex-only", "v 0 0 0\nv 1 1 1\n");
-        let err = probe_format(&p).unwrap_err();
+        let err = read_probed_file(&p).unwrap_err();
         assert!(err.contains("wrfm convert"), "hint: {err}");
     }
 
@@ -2194,7 +2203,7 @@ mod tests {
         // obj — it is "unrecognized".
         let v_e = temp_wrfm("v-e", "v 0 0 0\nv 1 1 1\ne 0 1\n");
         assert!(
-            probe_format(&v_e).is_err(),
+            read_probed_file(&v_e).is_err(),
             "v/e without magic must not probe as wrfm"
         );
         let err = load_model(&v_e).expect_err("v/e without magic must fail");
@@ -2203,11 +2212,11 @@ mod tests {
         // Edge-only or marker-less content is likewise never wrfm.
         let edge_only = temp_wrfm("edge-only", "e 0 1\n");
         assert!(
-            probe_format(&edge_only).is_err(),
+            read_probed_file(&edge_only).is_err(),
             "an edge-only file is not wrfm by the detection contract"
         );
         let comment_only = temp_wrfm("comment-only", "# just a comment\n");
-        assert!(probe_format(&comment_only).is_err());
+        assert!(read_probed_file(&comment_only).is_err());
     }
 
     #[test]
@@ -2219,7 +2228,7 @@ mod tests {
             "magic-obj",
             "wrfm 2\nvertices 2   edges 1\n\nv 0 0 0\nv 1 0 0\ne 0 1\nf 1 2 3\n",
         );
-        probe_format(&p).expect("magic wins");
+        read_probed_file(&p).expect("magic wins");
         let (mode, _) = load_model(&p).expect("magic must win over obj markers");
         let m = mode;
         assert_eq!(m.vertices.len(), 2);
@@ -2231,7 +2240,7 @@ mod tests {
         // An empty file has no first line -> no magic -> unrecognized
         // — never an Ok empty model.
         let p = temp_wrfm("empty", "");
-        assert!(probe_format(&p).is_err());
+        assert!(read_probed_file(&p).is_err());
         let err = load_model(&p).expect_err("empty file must fail to load");
         assert!(
             err.contains("unrecognized"),
@@ -3579,6 +3588,7 @@ mod tests {
         let buf2 = b"wrfm 2\nf 1 2 3\n";
         probe_bytes(buf2).expect("magic wins over obj markers");
     }
+
     /// SHIFT is the only modifier that changes an action: Ctrl binds quitting
     /// (raw mode delivers Ctrl+C / Ctrl+Q as key events, with no SIGINT) plus
     /// the local-frame rotation letters, and every other modifier swallows the

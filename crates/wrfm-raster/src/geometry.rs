@@ -3,8 +3,17 @@
 
 use crate::Model;
 
-/// Vertical field of view in degrees — the wireforge fork's projection.
-pub const FOV_DEG: f64 = 60.0;
+/// Default vertical field of view in RADIANS — the wireforge fork's
+/// projection. Vertical is the ONE authoritative axis: the horizontal field
+/// follows from the canvas aspect ratio and is never clamped (wireforge
+/// never needs to fill the screen — content outside the frustum is simply
+/// not drawn).
+pub const DEFAULT_VFOV: f64 = 1.0;
+
+/// Upper bound on a caller-supplied vertical FOV (radians): ~172°, wide
+/// enough for any sane view and past which `tan(vfov/2)` explodes. CLIs
+/// reject values outside `(0, MAX_VFOV]` as usage errors.
+pub const MAX_VFOV: f64 = 3.0;
 
 /// Auto-fit headroom: the model fills 1/FIT_MARGIN of the screen height.
 pub const FIT_MARGIN: f64 = 2.0;
@@ -125,17 +134,18 @@ pub fn extent_from_bounds(b: ([f64; 3], [f64; 3])) -> f64 {
 }
 
 /// Auto camera distance (the fork's `fit_to` math): the geometric-mean
-/// extent fills 1/FIT_MARGIN of the screen half-height.
-pub fn auto_dist(m: &Model) -> f64 {
-    auto_dist_from_extent(model_extent(m))
+/// extent fills 1/FIT_MARGIN of the screen half-height at vertical FOV
+/// `vfov` (radians).
+pub fn auto_dist(m: &Model, vfov: f64) -> f64 {
+    auto_dist_from_extent(model_extent(m), vfov)
 }
 
 /// [`auto_dist`] from an already-computed [`model_extent`] — for callers that
 /// keep their own (e.g. the viewer caches it once, since a loaded model is
 /// immutable and the extent does not move with the view).
-pub fn auto_dist_from_extent(extent: f64) -> f64 {
+pub fn auto_dist_from_extent(extent: f64, vfov: f64) -> f64 {
     let r = extent.max(1e-6);
-    r / (FOV_DEG / 2.0).to_radians().tan() * FIT_MARGIN
+    r / (vfov / 2.0).tan() * FIT_MARGIN
 }
 
 #[cfg(test)]
@@ -162,14 +172,16 @@ mod tests {
     }
 
     #[test]
-    fn auto_dist_matches_the_fork() {
-        // A +-1 tetrahedron has extent 2; the fork's fit_to is
-        // extent / tan(FOV/2) * FIT_MARGIN.
-        let expected = 2.0 / (FOV_DEG / 2.0).to_radians().tan() * FIT_MARGIN;
+    fn auto_dist_widens_as_vfov_narrows() {
+        // Structural, not a restatement of the formula: a smaller vertical
+        // FOV sees less, so the same model must sit FARTHER away. The exact
+        // number depends on the caller's vfov, never on a baked-in default.
+        let m = tetra();
+        let near = auto_dist(&m, 2.0);
+        let far = auto_dist(&m, 0.5);
         assert!(
-            (auto_dist(&tetra()) - expected).abs() < 1e-9,
-            "got {} expected {expected}",
-            auto_dist(&tetra())
+            far > near,
+            "vfov 0.5 ({far}) must frame farther than vfov 2.0 ({near})"
         );
         // An elongated model: the geomean is not dominated by the long axis.
         let long = Model {
@@ -183,16 +195,42 @@ mod tests {
     }
 
     #[test]
+    fn auto_dist_scales_linearly_with_extent() {
+        // Doubling the model's size (every vertex scaled 2x doubles the
+        // geometric-mean extent) must exactly double the fit distance: the
+        // extent enters the distance linearly.
+        let base_m = tetra();
+        let big_m = Model {
+            vertices: base_m
+                .vertices
+                .iter()
+                .map(|&(x, y, z)| (2.0 * x, 2.0 * y, 2.0 * z))
+                .collect(),
+            edges: base_m.edges.clone(),
+        };
+        for vfov in [0.5, 1.0, 2.5] {
+            let base = auto_dist(&base_m, vfov);
+            let big = auto_dist(&big_m, vfov);
+            assert!(
+                (big - 2.0 * base).abs() < 1e-12,
+                "distance must be linear in extent at vfov {vfov}: {base} vs {big}"
+            );
+        }
+    }
+
+    #[test]
     fn auto_dist_from_extent_matches_auto_dist() {
         // The extent-taking form is the primitive `auto_dist` is built on, so
         // a caller that caches the extent gets the very same distance (the
         // viewer's `fit_to` relies on that: it must not drift from the CLI's).
         for m in [tetra(), Model::default()] {
-            assert_eq!(
-                auto_dist(&m),
-                auto_dist_from_extent(model_extent(&m)),
-                "cached-extent distance must be bit-identical"
-            );
+            for vfov in [0.5, DEFAULT_VFOV, 2.5] {
+                assert_eq!(
+                    auto_dist(&m, vfov),
+                    auto_dist_from_extent(model_extent(&m), vfov),
+                    "cached-extent distance must be bit-identical at vfov {vfov}"
+                );
+            }
         }
     }
 
@@ -207,22 +245,27 @@ mod tests {
             MIN_EXTENT,
             "an empty model must report MIN_EXTENT, never NaN"
         );
-        let d = auto_dist(&empty);
-        assert!(
-            d.is_finite() && d > 0.0,
-            "auto-fit of an empty model must stay finite and positive, got {d}"
-        );
-        // The floor is the *unit scene*: an empty model sits at the viewer's
-        // default distance (1 / tan(FOV/2) * FIT_MARGIN).
-        let expected = 1.0 / (FOV_DEG / 2.0).to_radians().tan() * FIT_MARGIN;
-        assert!((d - expected).abs() < 1e-9, "got {d} expected {expected}");
+        for vfov in [0.5, DEFAULT_VFOV, MAX_VFOV] {
+            let d = auto_dist(&empty, vfov);
+            assert!(
+                d.is_finite() && d > 0.0,
+                "auto-fit of an empty model must stay finite and positive at vfov {vfov}, got {d}"
+            );
+            // The floor is the *unit scene*: an empty model sits at the unit
+            // extent's distance — exactly what the same vfov gives a 1-unit model.
+            assert_eq!(
+                d,
+                auto_dist_from_extent(1.0, vfov),
+                "an empty model is the unit scene at vfov {vfov}"
+            );
+        }
         // A single point (all dimensions zero, not an empty bounding box)
         // stays finite too.
         let point = Model {
             vertices: vec![(5.0, 5.0, 5.0)],
             edges: vec![],
         };
-        let d = auto_dist(&point);
+        let d = auto_dist(&point, DEFAULT_VFOV);
         assert!(d.is_finite() && d > 0.0, "one-vertex model: {d}");
     }
 

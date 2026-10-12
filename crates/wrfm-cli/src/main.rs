@@ -25,6 +25,7 @@ macro_rules! err {
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
+use wrfm_raster::geometry::{DEFAULT_VFOV, MAX_VFOV};
 
 /// The complete `.wrfm` v2 format spec, as printed by `wrfm format`.
 const FORMAT_SPEC: &str = r#".wrfm format v2 — plain text, one element per line
@@ -244,6 +245,9 @@ enum Command {
         /// Scope the view to one group.
         #[arg(long)]
         group: Option<String>,
+        /// Vertical field of view in RADIANS (default 1.0; must be > 0 and <= 3). Feeds the auto camera distance (--auto-dist).
+        #[arg(long, default_value_t = DEFAULT_VFOV)]
+        vfov: f64,
     },
     /// Render the model to terminal text (braille / ascii / grid).
     Render {
@@ -299,6 +303,9 @@ enum Command {
         /// Render only this group (its vertices + the edges touching it).
         #[arg(long)]
         group: Option<String>,
+        /// Vertical field of view in RADIANS (default 1.0; must be > 0 and <= 3). The horizontal field follows from the canvas aspect ratio and is never clamped.
+        #[arg(long, default_value_t = DEFAULT_VFOV)]
+        vfov: f64,
     },
     /// Apply an affine transform and print the result as canonical .wrfm text.
     Transform {
@@ -479,6 +486,7 @@ fn main() {
             pan_x,
             pan_y,
             group,
+            vfov,
         } => cmd_view(
             &file,
             pitch,
@@ -489,6 +497,7 @@ fn main() {
             pan_x,
             pan_y,
             group.as_deref(),
+            vfov,
         ),
         Command::Render {
             file,
@@ -508,6 +517,7 @@ fn main() {
             yaw,
             roll,
             group,
+            vfov,
         } => cmd_render(
             &file,
             &views,
@@ -526,6 +536,7 @@ fn main() {
             yaw,
             roll,
             group.as_deref(),
+            vfov,
         ),
         Command::Transform {
             file,
@@ -644,6 +655,19 @@ fn resolve_group<'a>(
     })
 }
 
+/// Validate a `--vfov` value: vertical FOV in radians, `(0, MAX_VFOV]`.
+/// 0 would divide by zero in the focal length; past MAX_VFOV (~172°) the
+/// projection degenerates. Usage error -> exit 3.
+fn validate_vfov(vfov: f64) -> Result<f64, i32> {
+    if vfov > 0.0 && vfov <= MAX_VFOV {
+        Ok(vfov)
+    } else {
+        Err(usage(&format!(
+            "vfov must be > 0 and <= {MAX_VFOV} radians, got {vfov}"
+        )))
+    }
+}
+
 /// Build the `RenderOptions` for `wrfm render`, parsing the string options (views / format / region / fit) with usage-error → exit 3 mapping.
 #[allow(clippy::too_many_arguments)]
 fn render_opts(
@@ -662,9 +686,11 @@ fn render_opts(
     pitch: f64,
     yaw: f64,
     roll: f64,
+    vfov: f64,
 ) -> Result<render::RenderOptions, i32> {
     let parsed_views = parse_views(views)?;
     let fmt = render::Format::parse(format).map_err(|e| usage(&e))?;
+    let vfov = validate_vfov(vfov)?;
     let reg = match region {
         None => None,
         Some(s) => parse_region(s)?,
@@ -700,6 +726,7 @@ fn render_opts(
         grid_h,
         region: reg,
         fit_content,
+        vfov,
     })
 }
 
@@ -1197,7 +1224,12 @@ fn cmd_view(
     pan_x: f64,
     pan_y: f64,
     group: Option<&str>,
+    vfov: f64,
 ) -> i32 {
+    let vfov = match validate_vfov(vfov) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
     let loaded = match load(file) {
         Ok(l) => l,
         Err(code) => return code,
@@ -1214,7 +1246,7 @@ fn cmd_view(
         None => loaded.model.clone(),
     };
     let dist = if auto_dist {
-        wrfm_raster::geometry::auto_dist(&model)
+        wrfm_raster::geometry::auto_dist(&model, vfov)
     } else {
         dist.unwrap_or(render::DEFAULT_DIST)
     };
@@ -1252,6 +1284,7 @@ fn cmd_render(
     yaw: f64,
     roll: f64,
     group: Option<&str>,
+    vfov: f64,
 ) -> i32 {
     let loaded = match load(file) {
         Ok(l) => l,
@@ -1260,7 +1293,7 @@ fn cmd_render(
     let verdict = check::check_verdict(&loaded.model, false);
     let opts = match render_opts(
         views, format, width, height, grid_w, grid_h, region, fit, auto_dist, dist, pan_x, pan_y,
-        pitch, yaw, roll,
+        pitch, yaw, roll, vfov,
     ) {
         Ok(o) => o,
         Err(code) => return code,
@@ -1305,11 +1338,12 @@ fn cmd_render(
         String::new()
     };
     out!(
-        "# wrfm render  format={fmt}{region_name}{fit_name}  canvas={}x{} chars ({}x{} px)  auto_dist={auto_dist}{camera_note}\n",
+        "# wrfm render  format={fmt}{region_name}{fit_name}  canvas={}x{} chars ({}x{} px)  auto_dist={auto_dist}  vfov={} rad{camera_note}\n",
         opts.width,
         opts.height,
         opts.width * 2,
-        opts.height * 4
+        opts.height * 4,
+        opts.vfov
     );
     out!(
         "# name={}  version={}  vertices={}  edges={}{}  bounds=min[{:.3},{:.3},{:.3}] max[{:.3},{:.3},{:.3}]\n",

@@ -185,6 +185,17 @@ nothing while `--auto-dist` is on, and it is on by default:
 wrfm render model.wrfm --views front --auto-dist false --dist 12
 ```
 
+`--vfov N` sets the vertical field of view in **radians** (default 1.0,
+valid range (0, 3]); it feeds both the focal length and the auto camera
+distance. The vertical axis is the only one you set: the horizontal field
+follows from the canvas aspect ratio and is never clamped — content outside
+the frustum is simply not drawn:
+
+```bash
+wrfm render model.wrfm --views front --vfov 0.5   # narrow: frames farther
+wrfm view model.wrfm --vfov 2.0                   # wide: frames closer
+```
+
 There is no built-in PNG encoder: `render` emits text, and an image tool turns
 it into a PNG. Braille text piped through ImageMagick defaults to **16-bit**
 PNG, which some viewers reject, so pin the depth:

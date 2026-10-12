@@ -629,7 +629,7 @@ mod tests {
         // Both endpoints in front of the plane: this entry point must
         // rasterize exactly what `rasterize_line` does with the same
         // projection applied to the endpoints.
-        let f = crate::projection::focal(32.0);
+        let f = crate::projection::focal(32.0, crate::geometry::DEFAULT_VFOV);
         let project = |p: [f64; 3]| crate::projection::project_camera_point(p, f);
         let (a, b) = ([3.0, -2.0, 6.0], [-4.0, 5.0, 9.0]);
         let want = {

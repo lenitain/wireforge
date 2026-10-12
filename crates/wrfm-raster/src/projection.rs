@@ -6,7 +6,7 @@
 //! cull, roll about the panned pivot, focal divide. Operation order is
 //! load-bearing: the golden tests compare rendered frames bit for bit.
 
-use crate::geometry::{FOV_DEG, Mat3};
+use crate::geometry::Mat3;
 
 /// How close to the camera a vertex may come before it counts as behind the
 /// camera plane: [`Camera::project_full`] culls a vertex whose depth
@@ -18,12 +18,14 @@ use crate::geometry::{FOV_DEG, Mat3};
 /// has to agree on where "kept" ends.
 pub const NEAR: f64 = 0.1;
 
-/// Focal length in canvas units for a dot-grid height of `px_h`:
-/// `f = (px_h / 2) / tan(FOV / 2)`.
+/// Focal length in canvas units for a dot-grid height of `px_h` at a
+/// vertical FOV of `vfov` (radians): `f = (px_h / 2) / tan(vfov / 2)`.
 ///
-/// `px_h` is the grid height in DOTS (character rows x 4 for braille).
-pub fn focal(px_h: f64) -> f64 {
-    (px_h / 2.0) / (FOV_DEG / 2.0).to_radians().tan()
+/// `px_h` is the grid height in DOTS (character rows x 4 for braille). The
+/// vertical FOV is the one authoritative axis; the horizontal field of view
+/// follows from the canvas width and is never clamped.
+pub fn focal(px_h: f64, vfov: f64) -> f64 {
+    (px_h / 2.0) / (vfov / 2.0).tan()
 }
 
 /// Project one CAMERA-SPACE point (`Camera::camera_space` output) to canvas
@@ -250,8 +252,8 @@ impl CameraF32 {
     }
 
     /// f32 focal length: the f64 value of [`focal`] rounded to f32 once.
-    pub fn focal(px_h: f64) -> f32 {
-        focal(px_h) as f32
+    pub fn focal(px_h: f64, vfov: f64) -> f32 {
+        focal(px_h, vfov) as f32
     }
 
     /// Project one vertex with f32 camera math; `out` is only written when
@@ -461,19 +463,34 @@ mod tests {
         ];
         for (pitch, yaw, roll, pan_x, pan_y, dist) in cases {
             let cam = Camera::new(world_rot(pitch, yaw), dist, roll.to_radians(), pan_x, pan_y);
-            out.push((cam, focal(240.0)));
+            out.push((cam, focal(240.0, crate::geometry::DEFAULT_VFOV)));
         }
         out
     }
 
     #[test]
-    fn focal_matches_the_fork_formula() {
-        for px_h in [1.0, 32.0, 96.0, 480.0, 4096.0] {
-            let expected = (px_h / 2.0) / (FOV_DEG / 2.0).to_radians().tan();
-            assert_eq!(focal(px_h).to_bits(), expected.to_bits(), "px_h={px_h}");
+    fn focal_lands_the_vfov_edge_on_the_canvas_edge() {
+        // The meaning of `focal`, stated as behaviour rather than restating
+        // its formula: a point at depth 1 sitting exactly on the vertical
+        // field-of-view ray (y = tan(vfov/2)) must project onto the canvas
+        // edge (px_h/2), for ANY vfov — the parameter is honoured, not a
+        // baked-in default.
+        for px_h in [32.0, 96.0, 480.0, 4096.0] {
+            for vfov in [0.25, crate::geometry::DEFAULT_VFOV, 1.7, 2.9] {
+                let f = focal(px_h, vfov);
+                let projected = f * (vfov / 2.0).tan();
+                assert!(
+                    (projected - px_h / 2.0).abs() < 1e-9,
+                    "px_h={px_h} vfov={vfov}: edge lands at {projected}, want {}",
+                    px_h / 2.0
+                );
+            }
         }
         // The f32 path rounds the same f64 value once.
-        assert_eq!(CameraF32::focal(240.0), focal(240.0) as f32);
+        assert_eq!(
+            CameraF32::focal(240.0, crate::geometry::DEFAULT_VFOV),
+            focal(240.0, crate::geometry::DEFAULT_VFOV) as f32
+        );
     }
 
     #[test]
@@ -516,7 +533,7 @@ mod tests {
     fn camera_f32_is_bit_identical_to_the_reference_f32_formula() {
         for (cam, f) in cameras() {
             let cam32 = CameraF32::new(&cam);
-            let f32v = CameraF32::focal(240.0);
+            let f32v = CameraF32::focal(240.0, crate::geometry::DEFAULT_VFOV);
             assert_eq!(f32v, f as f32);
             for p in points() {
                 let (mut out, mut ok) = ([0.0f32; 2], false);
@@ -543,7 +560,7 @@ mod tests {
         // without touching a single output pixel.
         for (cam, _) in cameras() {
             let cam32 = CameraF32::new(&cam);
-            let f32v = CameraF32::focal(240.0);
+            let f32v = CameraF32::focal(240.0, crate::geometry::DEFAULT_VFOV);
             let verts = points();
             let n = verts.len();
 
@@ -587,7 +604,7 @@ mod tests {
         // they must be the projection's own `(rx, ry, dist - rz)`, and `out`
         // / `ok` must stay identical to the plain batch projection.
         let cam = Camera::new(rot_axis([1.0, 2.0, 0.5], 37.0), 9.0, 0.4, 1.0, -1.0);
-        let f = focal(320.0);
+        let f = focal(320.0, crate::geometry::DEFAULT_VFOV);
         let verts = points();
         let n = verts.len();
         let mut out = vec![[0.0; 2]; n];
@@ -624,7 +641,7 @@ mod tests {
     #[test]
     fn project_all_matches_project_one() {
         let cam = Camera::new(rot_axis([1.0, 2.0, 0.5], 37.0), 9.0, 0.4, 1.0, -1.0);
-        let f = focal(320.0);
+        let f = focal(320.0, crate::geometry::DEFAULT_VFOV);
         let verts = points();
         let mut out = vec![[0.0; 2]; verts.len()];
         let mut ok = vec![false; verts.len()];

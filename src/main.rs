@@ -30,6 +30,7 @@ use std::{
 };
 use wrfm::WrfmModel;
 use wrfm_raster::Model;
+use wrfm_raster::geometry::{DEFAULT_VFOV, MAX_VFOV};
 
 mod render;
 mod timer;
@@ -66,6 +67,11 @@ struct Args {
     /// `.wrfm` file to open, or `-` to read from stdin (the default when stdin is
     /// not a terminal). Omit it on a terminal to open an empty canvas
     file: Option<PathBuf>,
+    /// Vertical field of view in RADIANS (default 1.0; must be > 0 and <= 3).
+    /// The horizontal field follows from the terminal's aspect ratio and is
+    /// never clamped — content outside the frustum is simply not drawn.
+    #[arg(long, default_value_t = DEFAULT_VFOV)]
+    vfov: f64,
 }
 
 /// HUD folding state: `?` toggles Collapsed <-> Expanded.
@@ -1288,11 +1294,14 @@ struct App {
 }
 
 impl App {
-    fn new(current: Model, name: String, strip_label: Option<String>) -> Self {
+    fn new(current: Model, name: String, strip_label: Option<String>, vfov: f64) -> Self {
         // One extent for the whole session: it frames the model now and then
         // serves every later frame (see the field's docs).
         let extent = view::model_extent(&current);
-        let mut view = ViewState::default();
+        let mut view = ViewState {
+            vfov,
+            ..ViewState::default()
+        };
         // Frame the model (an empty one lands at the default distance), so a
         // fresh App is always correctly framed — including the blank start-up
         // view, whose extent is undefined.
@@ -1833,6 +1842,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         default_hook(info);
     }));
     let args = Args::parse();
+    // Validate `--vfov` BEFORE any terminal setup: a bad value must fail
+    // fast on a sane screen, never inside raw mode. The valid range is
+    // (0, MAX_VFOV]; 0 would divide by zero and > MAX_VFOV makes the
+    // projection degenerate.
+    if !(args.vfov > 0.0 && args.vfov <= MAX_VFOV) {
+        eprintln!(
+            "--vfov must be > 0 and <= {MAX_VFOV} radians, got {}",
+            args.vfov
+        );
+        std::process::exit(1);
+    }
     // FILE has no default value: what happens without it depends on stdin.
     //
     // * stdin is NOT a terminal: it is a stream (`cat m.wrfm | wireforge`),
@@ -1961,7 +1981,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // L2 engine + viewer state.
     let (cols, rows) = crossterm::terminal::size()?;
-    let mut app = App::new(current_model, model_name, strip_label);
+    let mut app = App::new(current_model, model_name, strip_label, args.vfov);
     let mut engine = Engine::new(cols as usize, rows as usize);
     let mut timers = TimerScheduler::new();
     let mut last = Instant::now();
@@ -2603,7 +2623,7 @@ mod tests {
         // The stride the rasterizer paints with and the region it is handed
         // must be the same canvas: a grid left at the old size paints outside
         // the new bounds (or panics) instead of into them.
-        let mut app = App::new(Model::default(), "cube".to_string(), None);
+        let mut app = App::new(Model::default(), "cube".to_string(), None, DEFAULT_VFOV);
         let mut engine = Engine::new(80, 24);
         compose_frame(&mut app, &mut engine);
         engine.resize(120, 40);
@@ -2634,7 +2654,7 @@ mod tests {
         // occluded, and every cell outside it draws as if `?` were never
         // pressed — the two frames differ only inside the panel.
         let compose = |overlay: bool| {
-            let mut app = App::new(Model::default(), "cube".to_string(), None);
+            let mut app = App::new(Model::default(), "cube".to_string(), None, DEFAULT_VFOV);
             app.hud = if overlay {
                 Hud::Expanded
             } else {
@@ -2724,14 +2744,14 @@ mod tests {
     }
 
     fn status_app(name: &str) -> App {
-        App::new(Model::default(), name.to_string(), None)
+        App::new(Model::default(), name.to_string(), None, DEFAULT_VFOV)
     }
 
     #[test]
     fn the_empty_state_is_named_on_the_statusline() {
         // Started with no FILE on a terminal: there is no model to name, so
         // the pill says so rather than leaving the strip anonymous.
-        let app = App::new(Model::default(), "no file".to_string(), None);
+        let app = App::new(Model::default(), "no file".to_string(), None, DEFAULT_VFOV);
         assert!(
             status_text(&app, 80).starts_with(" no file "),
             "the pill names the empty state"
@@ -2751,6 +2771,7 @@ mod tests {
             Model::default(),
             "stream".to_string(),
             Some("/tmp/stream.fifo".to_string()),
+            DEFAULT_VFOV,
         );
         let text = status_text(&app, 100);
         assert!(text.starts_with(" /tmp/stream.fifo "), "pill: {text:?}");
@@ -2760,7 +2781,7 @@ mod tests {
     fn the_pill_never_takes_more_than_half_the_row() {
         // Otherwise a long path would starve the lamps and the hints that
         // share the strip with it, at any width.
-        let mut app = App::new(Model::default(), "cube".to_string(), None);
+        let mut app = App::new(Model::default(), "cube".to_string(), None, DEFAULT_VFOV);
         app.strip_label = Some("/home/someone/very/deep/project/tree/preview.fifo".to_string());
         for width in [20u16, 40, 80] {
             let text = status_text(&app, width);
@@ -2792,7 +2813,7 @@ mod tests {
 
     #[test]
     fn bare_modifiers_are_tracked_only_while_they_are_down() {
-        let mut app = App::new(Model::default(), "cube".to_string(), None);
+        let mut app = App::new(Model::default(), "cube".to_string(), None, DEFAULT_VFOV);
         app.dirty = false;
         app.handle_input(modifier_event(
             ModifierKeyCode::LeftControl,
@@ -2832,7 +2853,7 @@ mod tests {
     fn losing_focus_drops_held_modifiers() {
         // The release of a modifier held across an alt-tab goes to the other
         // window, exactly like the release of a held motion key.
-        let mut app = App::new(Model::default(), "cube".to_string(), None);
+        let mut app = App::new(Model::default(), "cube".to_string(), None, DEFAULT_VFOV);
         app.handle_input(modifier_event(
             ModifierKeyCode::LeftShift,
             KeyEventKind::Press,
@@ -3130,6 +3151,7 @@ mod tests {
             },
             "cube".to_string(),
             None,
+            DEFAULT_VFOV,
         );
         for key in ['j', 'l'] {
             app.handle_input(Event::Key(KeyEvent::new(
@@ -3171,6 +3193,7 @@ mod tests {
             },
             "cube".to_string(),
             None,
+            DEFAULT_VFOV,
         );
         app.handle_input(Event::Key(KeyEvent::new(
             KeyCode::Right,
@@ -3198,12 +3221,12 @@ mod tests {
             ],
             edges: vec![(0, 1), (0, 2), (0, 3), (1, 2), (2, 3), (3, 1)],
         };
-        let mut app = App::new(cube(), "cube".to_string(), None);
+        let mut app = App::new(cube(), "cube".to_string(), None, DEFAULT_VFOV);
         assert_eq!(app.extent, 2.0, "the extent is cached at construction");
 
         // The framing distance comes from that same cached extent, so it cannot
         // drift from what re-measuring the model would have produced.
-        let expected = wrfm_raster::geometry::auto_dist_from_extent(app.extent);
+        let expected = wrfm_raster::geometry::auto_dist_from_extent(app.extent, app.view.vfov);
         assert_eq!(
             app.view.dist, expected,
             "App::new must frame from the cached extent"
@@ -3233,6 +3256,7 @@ mod tests {
             },
             "cube".to_string(),
             None,
+            DEFAULT_VFOV,
         );
         let yaw0 = app.view.yaw;
         // Press: enter continuous state (motion applied by update_held)
@@ -3270,6 +3294,7 @@ mod tests {
             },
             "cube".to_string(),
             None,
+            DEFAULT_VFOV,
         );
         app.dirty = false;
 
@@ -3338,6 +3363,7 @@ mod tests {
             },
             "cube".to_string(),
             None,
+            DEFAULT_VFOV,
         );
         app.handle_input(Event::Key(KeyEvent::new(
             KeyCode::Right,
@@ -3367,6 +3393,7 @@ mod tests {
             },
             "cube".to_string(),
             None,
+            DEFAULT_VFOV,
         );
         // Press -> held; Release -> removed immediately (Kitty protocol).
         let press = Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
@@ -3388,6 +3415,7 @@ mod tests {
             },
             "cube".to_string(),
             None,
+            DEFAULT_VFOV,
         );
         app.handle_input(Event::Key(KeyEvent::new(
             KeyCode::Char(' '),
@@ -3430,6 +3458,7 @@ mod tests {
             },
             "cube".to_string(),
             None,
+            DEFAULT_VFOV,
         );
         let mut release = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
@@ -3706,6 +3735,7 @@ mod tests {
             },
             "cube".to_string(),
             None,
+            DEFAULT_VFOV,
         );
         // Press `h` (rotate), then press Shift: the Repeat now spells "move",
         // but it is still the same key, so there is exactly one hold — and a

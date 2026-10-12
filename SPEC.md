@@ -116,6 +116,23 @@ The result of a `wrfm-cli` transform can be viewed directly:
 wrfm edit model.wrfm --extract-group cabinet | wrfm transform - --scale 2 | wireforge -
 ```
 
+### Field of view
+
+`--vfov N` sets the vertical field of view in **radians** (default 1.0, valid
+range (0, 3]). It is fixed for the session — it feeds the focal length and
+the auto-fit camera distance at start-up.
+
+The vertical axis is the only one you set. The horizontal field of view
+follows from the terminal's aspect ratio and is **never clamped**: unlike a
+shooter that must fill the screen (and risks a horizontal FOV past 180° at
+extreme aspect ratios), wireforge does not need to fill the screen — content
+outside the frustum is simply not drawn.
+
+```bash
+wireforge model.wrfm --vfov 0.5   # narrow: zooms out (auto-fit frames farther)
+wireforge model.wrfm --vfov 2.0   # wide: zooms in
+```
+
 ### Key bindings
 
 Bindings are grouped by what you are doing, not by which modifier you hold.

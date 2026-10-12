@@ -1,6 +1,8 @@
 use rayon::prelude::*;
 use wrfm_raster::Model;
-use wrfm_raster::geometry::{IDENTITY, auto_dist_from_extent, mat_mul, rot_x, rot_y, rot_z};
+use wrfm_raster::geometry::{
+    DEFAULT_VFOV, IDENTITY, auto_dist_from_extent, mat_mul, rot_x, rot_y, rot_z,
+};
 use wrfm_raster::projection::{Camera, CameraF32, focal};
 
 /// Above this vertex count, projection and bounds switch to the rayon
@@ -10,7 +12,8 @@ const PARALLEL_THRESHOLD: usize = 100_000;
 /// A 3x3 row-major rotation matrix (model -> world).
 pub use wrfm_raster::geometry::Mat3;
 
-/// The six camera degrees of freedom (world-frame yaw/pitch, roll around the view axis).
+/// The six camera degrees of freedom (world-frame yaw/pitch, roll around the view axis)
+/// plus the vertical FOV that scales them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewState {
     /// Model -> world rotation matrix (yaw + pitch).
@@ -27,6 +30,10 @@ pub struct ViewState {
     pub pan_x: f64,
     /// Aim point Y offset (world units).
     pub pan_y: f64,
+    /// Vertical field of view (radians) — the one authoritative FOV axis;
+    /// the horizontal field follows from the canvas aspect ratio and is
+    /// never clamped. Set from `--vfov` at start-up.
+    pub vfov: f64,
 }
 
 impl Default for ViewState {
@@ -39,6 +46,7 @@ impl Default for ViewState {
             dist: 8.0,
             pan_x: 0.0,
             pan_y: 0.0,
+            vfov: DEFAULT_VFOV,
         }
     }
 }
@@ -139,9 +147,10 @@ impl ViewState {
 
     /// [`ViewState::fit_to`] from an already-computed [`model_extent`]: the
     /// distance is exactly what `fit_to` would set, without re-scanning every
-    /// vertex for a bounding box that cannot have changed.
+    /// vertex for a bounding box that cannot have changed. The framing uses
+    /// THIS view's `vfov`, so a `--vfov` session frames at its own FOV.
     pub fn fit_to_extent(&mut self, extent: f64) {
-        self.dist = auto_dist_from_extent(extent);
+        self.dist = auto_dist_from_extent(extent, self.vfov);
     }
 
     /// Reset rotation/pan and re-fit the distance (see [`ViewState::fit_to`]).
@@ -214,7 +223,7 @@ pub fn camera(v: &ViewState) -> Camera {
 /// this single-vertex form as their reference.
 #[cfg(test)]
 pub fn project_point(p: (f64, f64, f64), v: &ViewState, px_h: usize) -> Option<(f64, f64)> {
-    camera(v).project(p, focal(px_h as f64))
+    camera(v).project(p, focal(px_h as f64, v.vfov))
 }
 
 /// [`project_batch`] plus every vertex's camera-space point, so callers that
@@ -237,7 +246,7 @@ pub fn project_batch_with_camera_space(
     ok: &mut [bool],
     cam: &mut [[f64; 3]],
 ) {
-    let f = focal(px_h as f64);
+    let f = focal(px_h as f64, v.vfov);
     let camera = camera(v);
     if verts.len() >= PARALLEL_THRESHOLD {
         // rayon: projecting a vertex and reading its camera-space point are
@@ -270,7 +279,7 @@ pub fn project_batch(
     out: &mut [[f64; 2]],
     ok: &mut [bool],
 ) {
-    let f = focal(px_h as f64);
+    let f = focal(px_h as f64, v.vfov);
     let cam = camera(v);
     if verts.len() >= PARALLEL_THRESHOLD {
         // rayon: vertex projections are independent of each other (the render vertex bottleneck).
@@ -306,7 +315,7 @@ pub fn project_batch_f32_with_camera_space(
     ok: &mut [bool],
     cam_space: &mut [[f64; 3]],
 ) {
-    let f = CameraF32::focal(px_h as f64);
+    let f = CameraF32::focal(px_h as f64, v.vfov);
     let camera = camera(v);
     let cam32 = CameraF32::new(&camera);
     if verts.len() >= PARALLEL_THRESHOLD {
@@ -329,7 +338,6 @@ pub fn project_batch_f32_with_camera_space(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wrfm_raster::geometry::{FIT_MARGIN, FOV_DEG};
 
     fn cube() -> Model {
         let h = 1.0;
@@ -449,14 +457,15 @@ mod tests {
 
     #[test]
     fn fit_distance_frames_cube() {
-        let m = cube(); // geomean of (2,2,2) = 2 -> characteristic radius 2
+        let m = cube(); // geomean of (2,2,2) = 2
         let mut v = view();
         v.fit_to(&m);
-        let expected = 2.0 / (FOV_DEG / 2.0).to_radians().tan() * FIT_MARGIN;
-        assert!(
-            (v.dist - expected).abs() < 1e-9,
-            "dist={} expected={expected}",
-            v.dist
+        // The fit is the SHARED auto-fit math at this view's own vfov — not a
+        // formula restated against a default constant.
+        assert_eq!(
+            v.dist,
+            wrfm_raster::geometry::auto_dist_from_extent(2.0, v.vfov),
+            "fit_to_extent must use the view's vfov"
         );
         // A face vertex (half-extent = geomean/2) must be on-screen at the
         // fit distance.
@@ -464,6 +473,17 @@ mod tests {
         assert!(
             x.abs() < 100.0 && y.abs() < 50.0,
             "face vertex should be on-screen, got ({x},{y})"
+        );
+        // A narrower vfov frames farther, keeping the model the same size on
+        // screen: project with the view's vfov substituted.
+        let mut narrow = v;
+        narrow.vfov = 0.5;
+        narrow.fit_to_extent(2.0);
+        assert!(
+            narrow.dist > v.dist,
+            "narrower vfov must frame farther: {} vs {}",
+            narrow.dist,
+            v.dist
         );
     }
 
@@ -520,7 +540,9 @@ mod tests {
             v.rot = rot_y(-yaw.to_radians());
             let (x, y) = project_point((0.0, 0.0, 0.0), &v, 100).unwrap();
             // origin -> v' = pan -> sx = f*pan_x/dist, constant for any yaw.
-            let expected_x = (100.0f64 / 2.0) / (FOV_DEG / 2.0).to_radians().tan() * 2.0 / 8.0;
+            // `f` is the projection's own focal at THIS view's vfov, so the
+            // expectation tracks the parameter instead of a default constant.
+            let expected_x = focal(100.0, v.vfov) * v.pan_x / v.dist;
             assert!(
                 (x - expected_x).abs() < 1e-6 && y.abs() < 1e-6,
                 "rotation centre must stay on the panned model, yaw={yaw} got ({x},{y})"
@@ -641,7 +663,7 @@ mod tests {
         );
         // The floor is the unit scene (see `extent_from_bounds`), so the
         // empty view is framed exactly like a unit-sized model would be.
-        let expected = 1.0 / (FOV_DEG / 2.0).to_radians().tan() * FIT_MARGIN;
+        let expected = auto_dist_from_extent(1.0, v.vfov);
         assert!(
             (v.dist - expected).abs() < 1e-9,
             "got {} expected {expected}",
@@ -736,7 +758,7 @@ mod tests {
         project_batch(&verts, &v, 120, &mut out_par, &mut ok_par);
         let mut out_ser = vec![[0.0; 2]; verts.len()];
         let mut ok_ser = vec![false; verts.len()];
-        let f = (120.0 / 2.0) / (FOV_DEG / 2.0).to_radians().tan();
+        let f = focal(120.0, v.vfov);
         let (sr, cr) = v.roll.sin_cos();
         let r = v.rot;
         let px = v.pan_x;

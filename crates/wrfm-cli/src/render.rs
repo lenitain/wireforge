@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use wrfm_raster::Model;
-use wrfm_raster::geometry::{auto_dist, bounds, world_rot};
+use wrfm_raster::geometry::{DEFAULT_VFOV, auto_dist, bounds, world_rot};
 use wrfm_raster::projection::{Camera, focal, project_camera_point};
 use wrfm_raster::raster::{Viewport, dots_to_lines, rasterize_camera_line};
 
@@ -143,6 +143,10 @@ pub struct RenderOptions {
     pub region: Option<[f64; 4]>,
     /// `--fit content`: crop each frame to the projected content bounding box, so the model fills the canvas. Applied per view AFTER the camera transform, so each view's content fills its canvas.
     pub fit_content: bool,
+    /// Vertical field of view in RADIANS (`--vfov`): the one authoritative
+    /// FOV axis; the horizontal field follows from the canvas aspect ratio
+    /// and is never clamped.
+    pub vfov: f64,
 }
 
 /// Inter-group adjacency for every group: how many BOUNDARY edges (exactly one endpoint in the group) connect to each OTHER group (the other endpoint is credited to the first group in file order owning it).
@@ -307,7 +311,7 @@ pub fn fit_content_region(
     let px_w = opts.width.max(1) as f64 * 2.0;
     let px_h = opts.height.max(1) as f64 * 4.0;
     let dist = if opts.auto_dist {
-        auto_dist(m)
+        auto_dist(m, opts.vfov)
     } else {
         opts.dist.unwrap_or(DEFAULT_DIST)
     };
@@ -318,7 +322,7 @@ pub fn fit_content_region(
         opts.pan_x,
         opts.pan_y,
     );
-    let f = focal(px_h);
+    let f = focal(px_h, opts.vfov);
 
     // Projected content bounding box in canvas pixels (origin = centre).
     let (mut minx, mut maxx) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -367,6 +371,8 @@ struct GeomParams {
     pan_x: f64,
     pan_y: f64,
     region: Option<[f64; 4]>,
+    /// Vertical field of view in RADIANS (see `RenderOptions::vfov`).
+    vfov: f64,
 }
 
 /// Render `model` into an off-screen buffer and return the braille lines.
@@ -404,7 +410,7 @@ fn render_braille(m: &Model, g: &GeomParams) -> Vec<String> {
     // Shared camera: world-frame rotation, camera distance (auto-fit, or
     // the explicit/default distance), FOV focal length, roll and pan.
     let dist = if g.auto_dist {
-        auto_dist(m)
+        auto_dist(m, g.vfov)
     } else {
         g.dist.unwrap_or(DEFAULT_DIST)
     };
@@ -415,7 +421,7 @@ fn render_braille(m: &Model, g: &GeomParams) -> Vec<String> {
         g.pan_x,
         g.pan_y,
     );
-    let f = focal(px_h);
+    let f = focal(px_h, g.vfov);
 
     // Off-screen dot grid: characters x (2, 4) braille dots. A 0 canvas
     // dimension still allocates one cell (the same `max(1)` area ratatui
@@ -486,6 +492,7 @@ fn render_single_to_text(
         pan_x: opts.pan_x,
         pan_y: opts.pan_y,
         region,
+        vfov: opts.vfov,
     };
     let braille = render_braille(m, &g);
 
@@ -641,6 +648,7 @@ pub fn diff_to_text(a: &Model, b: &Model, opts: &DiffOptions, detail: bool) -> S
         pan_x: 0.0,
         pan_y: 0.0,
         region: None,
+        vfov: DEFAULT_VFOV,
     };
     let braille_a = render_braille(a, &g);
     let braille_b = render_braille(b, &g);
@@ -904,7 +912,7 @@ pub fn diff_to_json(a: &Model, b: &Model, limit: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wrfm_raster::geometry::{FIT_MARGIN, FOV_DEG, model_extent};
+    use wrfm_raster::geometry::model_extent;
 
     fn cube() -> Model {
         let mut verts = Vec::new();
@@ -1114,6 +1122,7 @@ mod tests {
             grid_h: 8,
             region: None,
             fit_content: false,
+            vfov: DEFAULT_VFOV,
         }
     }
 
@@ -1125,16 +1134,17 @@ mod tests {
     }
 
     #[test]
-    fn auto_dist_matches_fork() {
-        // The fork's fit_to: dist = extent / tan(FOV/2) * FIT_MARGIN, where
-        // extent is the geometric-mean bbox dimension. A +-1 tetrahedron has
-        // extent 2.
+    fn auto_dist_frames_by_vfov() {
+        // The CLI's auto camera distance is the SHARED auto-fit math at the
+        // requested vfov: a +-1 tetrahedron (extent 2) framed at a narrower
+        // vfov sits farther away. The exact value is the library's contract,
+        // not restated here.
         let m = tetra();
-        let expected = 2.0 / (FOV_DEG / 2.0).to_radians().tan() * FIT_MARGIN;
+        let wide = auto_dist(&m, 2.0);
+        let narrow = auto_dist(&m, 0.5);
         assert!(
-            (auto_dist(&m) - expected).abs() < 1e-9,
-            "auto_dist should equal fork's fit_to, got {}",
-            auto_dist(&m)
+            narrow > wide,
+            "narrower vfov must frame farther: {narrow} vs {wide}"
         );
         // Elongated model: the geomean is not dominated by the long axis.
         let long = Model {
@@ -1150,9 +1160,10 @@ mod tests {
     #[test]
     fn projection_matches_fork_math() {
         // Identity view of the cube front vertex at the fork's default
-        // distance: f = (px_h/2)/tan(30deg), z = dist - rz = 8 - 1 = 7.
+        // distance: z = dist - rz = 8 - 1, and the focal divide is f/z at
+        // whatever vfov the camera was built with.
         let cam = Camera::new(world_rot(0.0, 0.0), DEFAULT_DIST, 0.0, 0.0, 0.0);
-        let f = focal(64.0);
+        let f = focal(64.0, DEFAULT_VFOV);
         let p = cam.project((1.0, 1.0, 1.0), f).unwrap();
         let expected = f / 7.0;
         assert!(

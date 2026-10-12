@@ -18,7 +18,7 @@ use ratatui::symbols;
 use ratatui::widgets::Widget;
 use ratatui::widgets::canvas::{Canvas, Line};
 use wrfm_raster::Model;
-use wrfm_raster::geometry::{auto_dist, world_rot};
+use wrfm_raster::geometry::{DEFAULT_VFOV, auto_dist, world_rot};
 use wrfm_raster::projection::{Camera, focal};
 use wrfm_raster::raster::{Viewport, dots_to_lines, rasterize_line};
 
@@ -123,7 +123,7 @@ fn assert_frames_equal(ours: &[String], golden: &[String], label: &str) {
 /// A camera set exercising rotation, pan, zoom and roll (the TUI's golden
 /// cases): `(label, camera)`.
 fn cameras(m: &Model) -> Vec<(&'static str, Camera)> {
-    let fit = auto_dist(m);
+    let fit = auto_dist(m, DEFAULT_VFOV);
     vec![
         (
             "identity",
@@ -148,7 +148,7 @@ fn centered_window_matches_ratatui_canvas() {
         for (cam_label, cam) in cameras(&model) {
             for (w, h) in [(40usize, 20usize), (17, 9), (60, 24)] {
                 let (px_w, px_h) = (w * 2, h * 4);
-                let f = focal(px_h as f64);
+                let f = focal(px_h as f64, DEFAULT_VFOV);
                 let vp = Viewport::centered(px_w, px_h);
                 let ours = render_ours(&model, &cam, f, w, h, vp);
                 let golden = render_ratatui(&model, &cam, f, w as u16, h as u16, vp);
@@ -177,7 +177,7 @@ fn region_window_matches_ratatui_canvas() {
         for (cam_label, cam) in cameras(&model) {
             for (w, h) in [(40usize, 20usize), (13, 7)] {
                 let (px_w, px_h) = (w * 2, h * 4);
-                let f = focal(px_h as f64);
+                let f = focal(px_h as f64, DEFAULT_VFOV);
                 for r in regions {
                     // The CLI's exact window derivation from normalized fractions.
                     let vp = Viewport::from_arrays(
@@ -218,7 +218,7 @@ fn arbitrary_window_matches_ratatui_canvas() {
     for (cam_label, cam) in cameras(&m) {
         for (w, h) in [(40usize, 20usize), (23, 11)] {
             let (px_w, px_h) = (w * 2, h * 4);
-            let f = focal((h * 4) as f64);
+            let f = focal((h * 4) as f64, DEFAULT_VFOV);
             for win in windows {
                 let vp = Viewport::from_arrays(px_w, px_h, [win[0], win[1]], [win[2], win[3]]);
                 let ours = render_ours(&m, &cam, f, w, h, vp);
@@ -239,10 +239,16 @@ fn arbitrary_window_matches_ratatui_canvas() {
 #[test]
 fn degenerate_and_blank_windows_yield_spaces() {
     let m = cube();
-    let cam = Camera::new(world_rot(30.0, -45.0), auto_dist(&m), 0.0, 0.0, 0.0);
+    let cam = Camera::new(
+        world_rot(30.0, -45.0),
+        auto_dist(&m, DEFAULT_VFOV),
+        0.0,
+        0.0,
+        0.0,
+    );
     let (w, h) = (40usize, 20usize);
     let (px_w, px_h) = (w * 2, h * 4);
-    let f = focal((h * 4) as f64);
+    let f = focal((h * 4) as f64, DEFAULT_VFOV);
     for vp in [
         Viewport::from_arrays(px_w, px_h, [0.0, 0.0], [0.0, 0.0]),
         Viewport::from_arrays(px_w, px_h, [-20.0, 20.0], [0.0, 0.0]),

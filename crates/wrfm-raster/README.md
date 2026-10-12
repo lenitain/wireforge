@@ -17,14 +17,14 @@ across centered, region-zoom and arbitrary windows.
 ## Example
 
 ```rust
-use wrfm_raster::geometry::world_rot;
+use wrfm_raster::geometry::{DEFAULT_VFOV, world_rot};
 use wrfm_raster::projection::{focal, Camera};
 use wrfm_raster::raster::{dots_to_lines, rasterize_line, Bounds};
 
 let (cw, ch) = (20, 8);
 let (px_w, px_h) = (cw * 2, ch * 4);
 let cam = Camera::new(world_rot(0.0, 0.0), 8.0, 0.0, 0.0, 0.0);
-let f = focal(px_h as f64);
+let f = focal(px_h as f64, DEFAULT_VFOV);
 let mut dots = vec![0u8; cw * ch];
 
 if let (Some(a), Some(b)) = (cam.project((-10.0, -5.0, 0.0), f),

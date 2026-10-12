@@ -486,7 +486,7 @@ impl Rasterizer {
             // paints into its own scratch grid, then the grids are OR-ed into
             // the resident buffers. All model dots are cyan, so the merge is
             // order-independent.
-            self.rasterize_edges_par(&model.edges, vp, cyan);
+            self.rasterize_edges_par(&model.edges, vp, cyan, view.vfov);
         } else {
             for &(a, b) in &model.edges {
                 if !self.proj_ok[a] && !self.proj_ok[b] {
@@ -498,7 +498,7 @@ impl Rasterizer {
                     self.proj_cam[b],
                     self.proj_ok[b],
                     cyan,
-                    focal(px_h as f64),
+                    focal(px_h as f64, view.vfov),
                     vp,
                     &mut self.dots,
                     &mut self.colors,
@@ -519,7 +519,7 @@ impl Rasterizer {
         if show_axes {
             let axis_len = extent / 0.618;
             let cam = view::camera(view);
-            let scale = focal(px_h as f64);
+            let scale = focal(px_h as f64, view.vfov);
             let origin = cam.camera_space((0.0, 0.0, 0.0));
             let origin_ok = origin[2] > wrfm_raster::projection::NEAR;
             let ends = [
@@ -695,10 +695,16 @@ fn paint_segment_into(
 /// out too small would panic on the index rather than corrupt a buffer, which
 /// is the failure mode worth keeping.
 impl Rasterizer {
-    fn rasterize_edges_par(&mut self, edges: &[(usize, usize)], vp: Viewport, color: u8) {
+    fn rasterize_edges_par(
+        &mut self,
+        edges: &[(usize, usize)],
+        vp: Viewport,
+        color: u8,
+        vfov: f64,
+    ) {
         use rayon::prelude::*;
         let cells = vp.cells();
-        let scale = focal(vp.px_h() as f64);
+        let scale = focal(vp.px_h() as f64, vfov);
         let n_edges = edges.len();
         let n_shards = rayon::current_num_threads() * 4;
         let chunk_size = n_edges.div_ceil(n_shards).max(1);
@@ -833,7 +839,7 @@ mod tests {
                 // dropped: `clipped_segment` is the ratatui-side model of
                 // the near-plane clipping `rasterize_camera_line` does.
                 let cam = crate::view::camera(view);
-                let scale = focal(px_h as f64);
+                let scale = focal(px_h as f64, view.vfov);
                 for &(a, b) in &model.edges {
                     if let Some((ca, cb)) =
                         clipped_segment(&cam, model.vertices[a], model.vertices[b])
@@ -1096,7 +1102,7 @@ mod tests {
             &mut f64_cam,
         );
 
-        let f = wrfm_raster::projection::CameraF32::focal(px_h as f64) as f64;
+        let f = wrfm_raster::projection::CameraF32::focal(px_h as f64, v.vfov) as f64;
         let _cam = view::camera(&v);
         let mut worst = 0.0f64;
         for i in 0..n {
@@ -1711,7 +1717,7 @@ mod tests {
         v.fit_to(&m);
         let (cw, ch) = (200usize, 50usize);
         let vp = Viewport::centered(cw * 2, ch * 4);
-        let scale = focal((ch * 4) as f64);
+        let scale = focal((ch * 4) as f64, v.vfov);
         let mut par = Rasterizer::new();
         par.resize(cw, ch);
         let mut screen = Screen::new(cw, ch + 1);

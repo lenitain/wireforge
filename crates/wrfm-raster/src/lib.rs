@@ -16,7 +16,7 @@
 //! * [`raster`] — line clipping, Bresenham dot stepping, braille encoding
 //!
 //! ```
-//! use wrfm_raster::geometry::world_rot;
+//! use wrfm_raster::geometry::{DEFAULT_VFOV, world_rot};
 //! use wrfm_raster::projection::{focal, Camera};
 //! use wrfm_raster::raster::{dots_to_lines, rasterize_line, Viewport};
 //!
@@ -26,7 +26,7 @@
 //! let vp = Viewport::centered(cw * 2, ch * 4);
 //!
 //! let cam = Camera::new(world_rot(0.0, 0.0), 8.0, 0.0, 0.0, 0.0);
-//! let f = focal(vp.px_h() as f64);
+//! let f = focal(vp.px_h() as f64, DEFAULT_VFOV);
 //! let mut dots = vec![0u8; vp.cells()];
 //!
 //! // A line from (-10, -5) to (10, 5) in canvas coordinates.

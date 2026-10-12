@@ -2482,6 +2482,137 @@ fn render_fit_content_fills_the_canvas() {
     fs::remove_dir_all(&dir).ok();
 }
 
+// ---------------------------------------------------------------------------
+// --vfov (vertical field of view, RADIANS)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn render_vfov_is_echoed_and_wider_vfov_fills_more() {
+    // The vertical FOV drives the focal length and (via auto-dist) the
+    // camera distance: a WIDER vfov frames closer, so the same model takes
+    // up more of the canvas and lights more dots.
+    let dir = scratch("render_vfov");
+    let path = write(&dir, "cube.wrfm", CUBE);
+    let run_render = |vfov: &str| {
+        run(&[
+            "render",
+            path.to_str().unwrap(),
+            "--views",
+            "front",
+            "--format",
+            "ascii",
+            "--width",
+            "40",
+            "--height",
+            "16",
+            "--vfov",
+            vfov,
+        ])
+    };
+    let default = run(&[
+        "render",
+        path.to_str().unwrap(),
+        "--views",
+        "front",
+        "--format",
+        "ascii",
+        "--width",
+        "40",
+        "--height",
+        "16",
+    ]);
+    assert_eq!(
+        default.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&default)
+    );
+    let head = stdout(&default).lines().next().unwrap_or("").to_string();
+    assert!(head.contains("vfov=1 rad"), "header echoes vfov: {head}");
+
+    let narrow = run_render("0.5");
+    let wide = run_render("2.0");
+    assert_eq!(narrow.status.code(), Some(0), "stderr: {}", stderr(&narrow));
+    assert_eq!(wide.status.code(), Some(0), "stderr: {}", stderr(&wide));
+    let (n, w) = (lit_dots(&stdout(&narrow)), lit_dots(&stdout(&wide)));
+    assert!(
+        w > n,
+        "wider vfov must light more dots: vfov2.0={w} vfov0.5={n}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn render_and_view_reject_out_of_range_vfov() {
+    // The valid range is (0, 3] radians; anything else is a usage error (3)
+    // on BOTH camera subcommands.
+    let dir = scratch("vfov_out_of_range");
+    let path = write(&dir, "cube.wrfm", CUBE);
+    for cmd in ["render", "view"] {
+        for bad in ["0", "-1", "3.01"] {
+            // `--vfov=-1` (equals form): a space-separated `-1` would be
+            // parsed as a flag by clap, not as this option's value.
+            let out = run(&[cmd, path.to_str().unwrap(), &format!("--vfov={bad}")]);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{cmd} --vfov {bad}: stderr {}",
+                stderr(&out)
+            );
+            assert!(
+                stderr(&out).contains("vfov must be"),
+                "{cmd} --vfov {bad}: stderr {}",
+                stderr(&out)
+            );
+        }
+    }
+    // The boundary itself is accepted: 3 radians on both subcommands.
+    let out = run(&[
+        "render",
+        path.to_str().unwrap(),
+        "--vfov",
+        "3",
+        "--views",
+        "front",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "render --vfov 3: stderr {}",
+        stderr(&out)
+    );
+    let out = run(&["view", path.to_str().unwrap(), "--vfov", "3"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "view --vfov 3: stderr {}",
+        stderr(&out)
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn view_vfov_widens_the_auto_camera_distance() {
+    // `view` echoes the camera it used; a narrower vfov must auto-frame
+    // FARTHER (the model keeps its on-screen size as the frustum narrows).
+    let dir = scratch("view_vfov");
+    let path = write(&dir, "cube.wrfm", CUBE);
+    let dist_for = |vfov: &str| -> f64 {
+        let out = run(&["view", path.to_str().unwrap(), "--vfov", vfov]);
+        assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+        stdout_json(&out)["view"]["dist"]
+            .as_f64()
+            .expect("view.dist")
+    };
+    let near = dist_for("2.0");
+    let far = dist_for("0.5");
+    assert!(
+        far > near,
+        "vfov 0.5 must frame farther than vfov 2.0: {far} vs {near}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn edit_weld_merges_vertices_within_tolerance() {
     let dir = scratch("edit_weld_merges");

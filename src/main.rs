@@ -575,19 +575,18 @@ fn apply_motion_step(view: &mut ViewState, m: Motion, rot: f64, mv: f64) {
         Motion::YawRight => view.add_yaw(rot),
         Motion::PitchUp => view.add_pitch(-rot),
         Motion::PitchDown => view.add_pitch(rot),
-        // View-frame roll: `d` rolls about the sight line (into the
-        // screen) in the viewer's sense — the viewer's left side (screen
-        // left) dips, i.e. the image turns anticlockwise; `f` is the mirror.
-        // That axis is anti-parallel to the model's front (+Z out of the
-        // screen), so plain d and Ctrl+d read as mirror images at the
-        // default view: Ctrl+d rolls the body to its own left, lifting
-        // starboard — the screen-LEFT side, since the model's own right is
-        // the viewer's left — where plain d dips it.
-        Motion::RollPlus => view.roll -= rot,
-        Motion::RollMinus => view.roll += rot,
+        // World-frame roll: the third member of the yaw/pitch family —
+        // `d` pre-multiplies a world-Z (sight-line) rotation into the
+        // model->world matrix, exactly as `h`/`l` pre-multiply world-Y.
+        // The SENSE is the viewer's: positive roll spins the image
+        // anticlockwise, so plain `d` (QWERTY, left of `f`) dips the
+        // viewer's screen-left side — the mirror of Ctrl+d, which rolls
+        // the model to its own left (the model faces out of the screen,
+        // its left is the viewer's right).
+        Motion::RollPlus => view.add_roll(-rot),
+        Motion::RollMinus => view.add_roll(rot),
         // Local-frame rotation: the same step post-multiplied, so the axis
-        // rides with the model. Local roll lives in the rotation matrix (see
-        // ViewState::add_roll_local), never in the screen-space `roll`.
+        // rides with the model (see the `add_*_local` methods).
         Motion::LocalYawLeft => view.add_yaw_local(rot),
         Motion::LocalYawRight => view.add_yaw_local(-rot),
         Motion::LocalPitchUp => view.add_pitch_local(-rot),
@@ -3295,11 +3294,10 @@ mod tests {
         );
     }
 
-    /// The roll keys (`d` / `f`) move ONLY the camera roll, which no other
-    /// rotation key touches — so a renderer that drops the roll leaves them
-    /// turning nothing on screen while `hjkl` and `Ctrl+d` keep working.
-    /// Pin the whole chain the operator sees: key event -> held motion ->
-    /// composed frame.
+    /// The roll keys (`d` / `f`) roll the MODEL about the world Z axis — the
+    /// same pre-multiplied world-frame rotation `hjkl` use — so they turn
+    /// the frame exactly like any other rotation key. Pin the whole chain
+    /// the operator sees: key event -> held motion -> composed frame.
     #[test]
     fn d_key_turns_the_composed_frame() {
         let frame = |app: &mut App| {
@@ -3592,9 +3590,12 @@ mod tests {
 
         let mut v = ViewState::default();
         apply_motion_step(&mut v, Motion::RollMinus, 0.3, 0.0);
+        // Plain d is a world-frame roll (pre-multiplied rot_z), mirroring
+        // Ctrl+d: the nose points out of the screen, so a roll to the
+        // viewer's anticlockwise dips the model's own left (screen-left).
         assert!(
-            v.roll > 0.0,
-            "plain d rolls about the sight line: the viewer's left dips (image CCW)"
+            v.rot[1][0] > 0.0,
+            "plain d rolls the model about the world Z axis, anticlockwise on screen"
         );
 
         let mut v = ViewState::default();

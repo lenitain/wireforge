@@ -12,17 +12,18 @@ const PARALLEL_THRESHOLD: usize = 100_000;
 /// A 3x3 row-major rotation matrix (model -> world).
 pub use wrfm_raster::geometry::Mat3;
 
-/// The six camera degrees of freedom (world-frame yaw/pitch, roll around the view axis)
-/// plus the vertical FOV that scales them.
+/// The viewer's pose: model rotation (yaw / pitch / roll, all as model
+/// rotations about world axes) plus the vertical FOV that scales them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewState {
-    /// Model -> world rotation matrix (yaw + pitch).
+    /// Model -> world rotation matrix (yaw + pitch + roll).
     pub rot: Mat3,
     /// Accumulated yaw angle (radians, display only).
     pub yaw: f64,
     /// Accumulated world-frame pitch (radians, display only).
     pub pitch: f64,
-    /// Roll around the view axis (radians).
+    /// Accumulated world-frame roll (radians, display only) — like `yaw` and
+    /// `pitch`, the angle the HUD reports; the rotation itself lives in `rot`.
     pub roll: f64,
     /// Camera distance from the file origin (zoom).
     pub dist: f64,
@@ -104,20 +105,27 @@ impl ViewState {
         self.pitch += d;
     }
 
-    /// Roll the model around its own (local) Z axis: positive `d` banks the
-    /// model to its own right (right-hand turn about the nose axis, so its
-    /// starboard side dips). The plain roll key (`d`, `Motion::RollMinus`) is
-    /// the *viewer's* frame instead: it rolls about the sight line, which
-    /// points into the screen while the nose points out of it, so at the
-    /// default view it and `Ctrl+d` read as mirror images (plain `d` dips the
-    /// viewer's left, `Ctrl+d` rolls the model to its own left and lifts
-    /// starboard). Unlike yaw/pitch it does NOT
-    /// touch the `roll` field: `roll` is the authoritative camera-frame
-    /// angle applied by `project_point`, so ticking it here as well would
-    /// rotate the image twice; the HUD therefore reports world-frame roll
-    /// only.
+    /// Roll the model around the world Z axis — the sight line at the default
+    /// view — pre-multiplied exactly like `add_yaw`/`add_pitch`, so roll is
+    /// the third member of the same world-frame family (the camera never
+    /// rolls; only the model turns). Positive `d` spins the image
+    /// anticlockwise: the model's +X side (screen-right at the default view)
+    /// swings up.
+    pub fn add_roll(&mut self, d: f64) {
+        self.rot = mat_mul(rot_z(d), self.rot);
+        self.roll += d;
+    }
+
+    /// Roll the model around its own (local) Z axis: `add_roll` with the step
+    /// post-multiplied instead of pre-multiplied, so the axis rides with the
+    /// model. Same direction convention as `add_roll` (positive = anticlockwise
+    /// on screen): when the two axes coincide the two keys produce the same
+    /// rotation. Because the nose points out of the screen while the sight
+    /// line points into it, `Ctrl+d` and plain `d` read as mirror images at
+    /// the default view (as `Ctrl+h` and plain `h` do).
     pub fn add_roll_local(&mut self, d: f64) {
         self.rot = mat_mul(self.rot, rot_z(d));
+        self.roll += d;
     }
 
     /// Spin the model around its own (local) Y axis (Space auto-spin).
@@ -212,8 +220,14 @@ pub fn model_extent(m: &Model) -> f64 {
 
 /// The shared camera built from this view state. `Camera::new` precomputes
 /// `roll.sin_cos()`, which is bit-identical to computing it per call.
+///
+/// The camera roll is ALWAYS zero here: every rotation the viewer applies
+/// (yaw, pitch and roll alike) lives in `v.rot` as a model rotation, so the
+/// image and the world can never disagree about which way is up. `Camera`'s
+/// roll survives for `wrfm-cli render --roll`, which poses the camera
+/// directly.
 pub fn camera(v: &ViewState) -> Camera {
-    Camera::new(v.rot, v.dist, v.roll, v.pan_x, v.pan_y)
+    Camera::new(v.rot, v.dist, 0.0, v.pan_x, v.pan_y)
 }
 
 /// Project a model-space vertex to canvas coordinates; `None` when behind the camera.
@@ -552,16 +566,17 @@ mod tests {
 
     #[test]
     fn roll_spins_around_panned_origin() {
-        // Rolling must spin the model around its pivot (the panned file
-        // origin), not around the screen centre: with a pan offset, the
-        // origin's projection stays fixed under any roll.
+        // Rolling the MODEL (world Z) must spin it around its pivot (the
+        // panned file origin), not around the screen centre: with a pan
+        // offset, the origin's projection stays fixed under any roll.
         let mut v = view();
         v.pan_x = 5.0;
         v.pan_y = 3.0;
         let (ox0, oy0) = project_point((0.0, 0.0, 0.0), &v, 100).unwrap();
         for roll in [15.0f64, 90.0, 180.0, -45.0] {
-            v.roll = roll.to_radians();
-            let (ox, oy) = project_point((0.0, 0.0, 0.0), &v, 100).unwrap();
+            let mut rolled = v;
+            rolled.add_roll(roll.to_radians());
+            let (ox, oy) = project_point((0.0, 0.0, 0.0), &rolled, 100).unwrap();
             assert!(
                 (ox - ox0).abs() < 1e-6 && (oy - oy0).abs() < 1e-6,
                 "origin (pivot) must stay fixed under roll, got ({ox},{oy}) vs ({ox0},{oy0})"
@@ -571,13 +586,43 @@ mod tests {
         // while rolling (it spins around it).
         let (px, py) = project_point((1.0, 0.0, 0.0), &v, 100).unwrap();
         let d0 = ((px - ox0).powi(2) + (py - oy0).powi(2)).sqrt();
-        v.roll += 90.0f64.to_radians();
+        v.add_roll(90.0f64.to_radians());
         let (qx, qy) = project_point((1.0, 0.0, 0.0), &v, 100).unwrap();
         let d1 = ((qx - ox0).powi(2) + (qy - oy0).powi(2)).sqrt();
         assert!(
             (d0 - d1).abs() < 1e-3,
             "rolling must keep the distance from the pivot, {d0} vs {d1}"
         );
+    }
+
+    #[test]
+    fn roll_is_a_world_frame_rotation_like_yaw_and_pitch() {
+        // `d` must be the third member of the yaw/pitch family: a
+        // pre-multiplied world-axis rotation in `rot`, not a camera pose.
+        let mut v = view();
+        v.add_roll(0.3);
+        assert_ne!(v.rot, IDENTITY, "roll must live in the model->world matrix");
+        assert!(
+            (v.roll - 0.3).abs() < 1e-12,
+            "HUD roll must track the angle"
+        );
+        // The camera itself never rolls: image and world agree on "up".
+        assert_eq!(camera(&v).roll, 0.0, "the viewer's camera must not roll");
+        // Pre-multiplied like yaw: rolling twice lands on the same rotation
+        // as one roll of the summed angle (up to float rounding).
+        let mut a = view();
+        a.add_roll(0.1);
+        a.add_roll(0.2);
+        let mut b = view();
+        b.add_roll(0.3);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (a.rot[i][j] - b.rot[i][j]).abs() < 1e-12,
+                    "world-frame rolls must accumulate at [{i}][{j}]"
+                );
+            }
+        }
     }
 
     #[test]
@@ -759,7 +804,8 @@ mod tests {
         let mut out_ser = vec![[0.0; 2]; verts.len()];
         let mut ok_ser = vec![false; verts.len()];
         let f = focal(120.0, v.vfov);
-        let (sr, cr) = v.roll.sin_cos();
+        // The viewer's camera never rolls (see `view::camera`), so the serial
+        // reference needs no roll term at all.
         let r = v.rot;
         let px = v.pan_x;
         let py = v.pan_y;
@@ -773,10 +819,7 @@ mod tests {
                 ok_ser[i] = false;
                 continue;
             }
-            let (dx, dy) = (rx - px, ry - py);
-            let rxr = px + dx * cr - dy * sr;
-            let ryr = py + dx * sr + dy * cr;
-            out_ser[i] = [f * rxr / z, f * ryr / z];
+            out_ser[i] = [f * rx / z, f * ry / z];
             ok_ser[i] = true;
         }
         assert_eq!(

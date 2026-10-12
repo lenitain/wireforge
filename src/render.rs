@@ -1013,7 +1013,7 @@ mod tests {
         assert_identical(&m, &v, 17, 9);
         // Roll.
         let mut v2 = fit(&m);
-        v2.roll = 0.9;
+        v2.add_roll(0.9);
         assert_identical(&m, &v2, 40, 20);
         // Roll about a PANNED pivot: the pivot is the panned origin, so this
         // is the case a screen-centre roll would get wrong.
@@ -1043,16 +1043,16 @@ mod tests {
             .collect()
     }
 
-    /// The roll keys (`d` / `f`) change ONLY the camera roll, and the
-    /// rasterizer draws from camera-space points — which carry the roll in
-    /// exactly one place, [`Camera::canvas_point`]. A roll the frame ignores
-    /// is a `d` / `f` that does nothing on screen, so pin the visible effect.
+    /// The roll keys (`d` / `f`) roll the MODEL about the world Z axis (the
+    /// third member of the yaw/pitch family), so the frame must turn whenever
+    /// the roll angle moves — a renderer that ignored the rotation matrix's
+    /// roll component would leave `d` / `f` dead while `hjkl` keep working.
     #[test]
     fn roll_turns_the_rasterized_frame() {
         let m = cube();
         let mut v = fit(&m);
         let unrolled = render_cells(&m, &v, 40, 20);
-        v.roll = 0.9;
+        v.add_roll(0.9);
         let rolled = render_cells(&m, &v, 40, 20);
         assert_ne!(
             unrolled, rolled,
@@ -1076,7 +1076,7 @@ mod tests {
         let mut v = fit(&m);
         v.add_yaw(0.7);
         v.add_pitch(-0.4);
-        v.roll = 0.9;
+        v.add_roll(0.9);
         v.pan_x = 3.0;
         v.pan_y = -2.0;
         let mut out = vec![[0.0; 2]; m.vertices.len()];
@@ -1124,13 +1124,13 @@ mod tests {
 
         let mut v = ViewState {
             dist: 8.0,
-            roll: 0.9,
             pan_x: 0.5,
             pan_y: -0.25,
             ..Default::default()
         };
         v.add_yaw(0.7);
         v.add_pitch(-0.4);
+        v.add_roll(0.9);
         let (px_w, px_h) = (400, 200);
 
         // f32 branch: exactly what `project` dispatches to.
@@ -1174,10 +1174,11 @@ mod tests {
 
             let (rx, ry) = (f32_cam[i][0], f32_cam[i][1]);
             let z = f32_cam[i][2];
-            let (sr, cr) = (v.roll.sin_cos().0, v.roll.sin_cos().1);
-            let (dx, dy) = (rx - v.pan_x, ry - v.pan_y);
-            let want_x = f * (v.pan_x + dx * cr - dy * sr) / z;
-            let want_y = f * (v.pan_y + dx * sr + dy * cr) / z;
+            // The viewer's camera never rolls: the roll is already inside the
+            // camera-space rotation, so the reference is a plain focal divide
+            // about the panned pivot.
+            let want_x = f * rx / z;
+            let want_y = f * ry / z;
 
             // The f32 path is exact f32 math widened to f64, so its error
             // against an f64 recomputation is bounded by f32 rounding at the
@@ -1773,9 +1774,9 @@ mod tests {
         let e = view::model_extent(&m);
         let mut v = ViewState::default();
         v.fit_to(&m);
-        // A non-zero roll: the camera carries it into `canvas_point`, and
-        // both paths must carry it the same way.
-        v.roll = 0.6;
+        // A non-zero roll: it lives in the rotation matrix, and both paths
+        // must carry it the same way.
+        v.add_roll(0.6);
         let (cw, ch) = (200usize, 50usize);
         let vp = Viewport::centered(cw * 2, ch * 4);
         let scale = focal((ch * 4) as f64, v.vfov);

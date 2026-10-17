@@ -260,6 +260,9 @@ pub fn project_batch_with_camera_space(
     ok: &mut [bool],
     cam: &mut [[f64; 3]],
 ) {
+    assert_eq!(verts.len(), out.len());
+    assert_eq!(verts.len(), ok.len());
+    assert_eq!(verts.len(), cam.len());
     let f = focal(px_h as f64, v.vfov);
     let camera = camera(v);
     if verts.len() >= PARALLEL_THRESHOLD {
@@ -293,6 +296,8 @@ pub fn project_batch(
     out: &mut [[f64; 2]],
     ok: &mut [bool],
 ) {
+    assert_eq!(verts.len(), out.len());
+    assert_eq!(verts.len(), ok.len());
     let f = focal(px_h as f64, v.vfov);
     let cam = camera(v);
     if verts.len() >= PARALLEL_THRESHOLD {
@@ -329,6 +334,9 @@ pub fn project_batch_f32_with_camera_space(
     ok: &mut [bool],
     cam_space: &mut [[f64; 3]],
 ) {
+    assert_eq!(verts.len(), out.len());
+    assert_eq!(verts.len(), ok.len());
+    assert_eq!(verts.len(), cam_space.len());
     let f = CameraF32::focal(px_h as f64, v.vfov);
     let camera = camera(v);
     let cam32 = CameraF32::new(&camera);

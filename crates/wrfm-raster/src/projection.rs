@@ -199,10 +199,10 @@ impl Camera {
         out: &mut [[f64; 2]],
         ok: &mut [bool],
     ) {
-        debug_assert_eq!(verts.len(), out.len());
-        debug_assert_eq!(verts.len(), ok.len());
-        for i in 0..verts.len() {
-            self.project_into(verts[i], f, &mut out[i], &mut ok[i]);
+        assert_eq!(verts.len(), out.len());
+        assert_eq!(verts.len(), ok.len());
+        for ((&p, o), k) in verts.iter().zip(out.iter_mut()).zip(ok.iter_mut()) {
+            self.project_into(p, f, o, k);
         }
     }
 
@@ -228,12 +228,17 @@ impl Camera {
         ok: &mut [bool],
         cam: &mut [[f64; 3]],
     ) {
-        debug_assert_eq!(verts.len(), out.len());
-        debug_assert_eq!(verts.len(), ok.len());
-        debug_assert_eq!(verts.len(), cam.len());
-        for i in 0..verts.len() {
-            self.project_into(verts[i], f, &mut out[i], &mut ok[i]);
-            cam[i] = self.camera_space(verts[i]);
+        assert_eq!(verts.len(), out.len());
+        assert_eq!(verts.len(), ok.len());
+        assert_eq!(verts.len(), cam.len());
+        for (((&p, o), k), c) in verts
+            .iter()
+            .zip(out.iter_mut())
+            .zip(ok.iter_mut())
+            .zip(cam.iter_mut())
+        {
+            self.project_into(p, f, o, k);
+            *c = self.camera_space(p);
         }
     }
 }
@@ -318,10 +323,10 @@ impl CameraF32 {
         out: &mut [[f32; 2]],
         ok: &mut [bool],
     ) {
-        debug_assert_eq!(verts.len(), out.len());
-        debug_assert_eq!(verts.len(), ok.len());
-        for i in 0..verts.len() {
-            self.project_into(verts[i], f, &mut out[i], &mut ok[i]);
+        assert_eq!(verts.len(), out.len());
+        assert_eq!(verts.len(), ok.len());
+        for ((&p, o), k) in verts.iter().zip(out.iter_mut()).zip(ok.iter_mut()) {
+            self.project_into(p, f, o, k);
         }
     }
 
@@ -361,10 +366,10 @@ impl CameraF32 {
         out: &mut [[f64; 2]],
         ok: &mut [bool],
     ) {
-        debug_assert_eq!(verts.len(), out.len());
-        debug_assert_eq!(verts.len(), ok.len());
-        for i in 0..verts.len() {
-            self.project_into_f64(verts[i], f, &mut out[i], &mut ok[i]);
+        assert_eq!(verts.len(), out.len());
+        assert_eq!(verts.len(), ok.len());
+        for ((&p, o), k) in verts.iter().zip(out.iter_mut()).zip(ok.iter_mut()) {
+            self.project_into_f64(p, f, o, k);
         }
     }
 
@@ -386,12 +391,17 @@ impl CameraF32 {
         cam_space: &mut [[f64; 3]],
         cam: &Camera,
     ) {
-        debug_assert_eq!(verts.len(), out.len());
-        debug_assert_eq!(verts.len(), ok.len());
-        debug_assert_eq!(verts.len(), cam_space.len());
-        for i in 0..verts.len() {
-            self.project_into_f64(verts[i], f, &mut out[i], &mut ok[i]);
-            cam_space[i] = cam.camera_space(verts[i]);
+        assert_eq!(verts.len(), out.len());
+        assert_eq!(verts.len(), ok.len());
+        assert_eq!(verts.len(), cam_space.len());
+        for (((&p, o), k), c) in verts
+            .iter()
+            .zip(out.iter_mut())
+            .zip(ok.iter_mut())
+            .zip(cam_space.iter_mut())
+        {
+            self.project_into_f64(p, f, o, k);
+            *c = cam.camera_space(p);
         }
     }
 }

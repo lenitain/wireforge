@@ -473,6 +473,9 @@ mod tests {
     fn fit_distance_frames_cube() {
         let m = cube(); // geomean of (2,2,2) = 2
         let mut v = view();
+        // Pin vfov above the "narrower" value below so the comparison is
+        // unambiguous and unaffected by DEFAULT_VFOV drift.
+        v.vfov = 1.0;
         v.fit_to(&m);
         // The fit is the SHARED auto-fit math at this view's own vfov — not a
         // formula restated against a default constant.

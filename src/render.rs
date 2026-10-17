@@ -1612,6 +1612,12 @@ mod tests {
         // `dist - z` (see `Camera::camera_space`), so z = 0.5 sits 0.5 in
         // front of the plane and z = 1.0 sits exactly on it, inside the
         // `z <= NEAR` cull. The segment between them crosses the plane.
+        // `vfov = 1.0` pins the projection math: focal(116) ≈ 106.2, so the
+        // visible vertex at depth 0.5 projects to x ≈ 106.2, inside the
+        // 240-wide canvas ([-120, 120]). The clipped end at depth 0.1
+        // projects three times further out and is Cohen-Sutherland clipped
+        // at the right canvas edge — the drawn segment lights pixels on
+        // the right side of the frame.
         let m = Model {
             vertices: vec![(0.5, 0.0, 0.5), (0.5, 0.0, 1.0)],
             edges: vec![(0, 1)],
@@ -1619,6 +1625,8 @@ mod tests {
         let e = view::model_extent(&m);
         let v = ViewState {
             dist: 1.0,
+            vfov: 1.0, // pinned so the geometry above stays valid
+            // independent of DEFAULT_VFOV drift.
             ..Default::default()
         };
         let front = view::project_point((0.5, 0.0, 0.5), &v, 116);

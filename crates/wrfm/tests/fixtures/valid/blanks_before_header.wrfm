@@ -1,0 +1,8 @@
+wrfm 2
+
+# blank lines between magic and header are tolerated
+# so are comments
+
+vertices 1   edges 0
+
+v 0 0 0

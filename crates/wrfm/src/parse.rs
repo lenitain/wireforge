@@ -7,7 +7,7 @@ use crate::model::{Group, WrfmModel};
 impl WrfmModel {
     /// Parses a model directly from a string (useful for include_str!).
     ///
-    /// The input must be v2 (v1 files are rejected): a `wrfm 2` magic line, a
+    /// The input must be a `wrfm 2` magic line, a
     /// `vertices <N> edges <M>` counts header, then `v` / `e` / `group`
     /// lines. Lenient: blank lines and `#` comments are skipped anywhere after
     /// the magic line, and unknown directives are skipped once the counts
@@ -195,7 +195,25 @@ impl WrfmModel {
                     for (i, axis) in axes.iter().enumerate() {
                         match toks.get(i + 1) {
                             Some(&(tok, col)) => match tok.parse::<f64>() {
-                                Ok(v) => coords[i] = v,
+                                Ok(v) => {
+                                    // Reject non-finite coordinates up front:
+                                    // ±inf / NaN cannot be part of a wireframe
+                                    // (bbox, distance and projection all propagate
+                                    // them silently and break rendering), so the
+                                    // format mandates finite IEEE-754 floats only.
+                                    if !v.is_finite() {
+                                        return Err(ParseError::InvalidVertex {
+                                            line,
+                                            column: col,
+                                            line_text: raw_line.to_string(),
+                                            detail: VertexError::NotFinite {
+                                                token: tok.to_string(),
+                                                axis: *axis,
+                                            },
+                                        });
+                                    }
+                                    coords[i] = v
+                                }
                                 Err(_) => {
                                     return Err(ParseError::InvalidVertex {
                                         line,

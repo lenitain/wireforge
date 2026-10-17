@@ -204,6 +204,12 @@ impl ParseError {
                 VertexError::NotANumber { token, axis } => {
                     format!("expected a number for the {axis} coordinate, got `{token}`")
                 }
+                VertexError::NotFinite { token, axis } => {
+                    format!(
+                        "{axis} coordinate `{token}` is not a finite number (rejected: \
+                         wireframe geometry cannot carry ±inf or NaN)"
+                    )
+                }
             },
             ParseError::InvalidEdge { detail, .. } => match detail {
                 EdgeError::MissingIndex { which } => {
@@ -260,6 +266,7 @@ impl ParseError {
             ParseError::InvalidVertex { detail, .. } => match detail {
                 VertexError::MissingCoordinate { .. } => 1,
                 VertexError::NotANumber { token, .. } => token.chars().count().max(1),
+                VertexError::NotFinite { token, .. } => token.chars().count().max(1),
             },
             ParseError::InvalidEdge { detail, .. } => match detail {
                 EdgeError::MissingIndex { .. } => 1,
@@ -360,6 +367,16 @@ pub enum VertexError {
     },
     /// "v 1.0 2.0 abc" — `token` is not a number for the coordinate `axis`.
     NotANumber {
+        token: String,
+        /// 'x', 'y' or 'z'.
+        axis: char,
+    },
+    /// "v 1.0 2.0 inf" — `token` is a number but it is `±inf` or `nan`.
+    /// Wireframe geometry cannot carry non-finite coordinates without
+    /// poisoning every downstream computation (bbox, distance, projection),
+    /// so the parser rejects them up front rather than silently producing
+    /// a model that cannot be rendered.
+    NotFinite {
         token: String,
         /// 'x', 'y' or 'z'.
         axis: char,

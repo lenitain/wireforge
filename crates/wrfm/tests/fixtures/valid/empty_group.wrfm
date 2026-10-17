@@ -1,0 +1,6 @@
+wrfm 2
+vertices 1   edges 0
+
+group empty
+group body
+  v 0 0 0

@@ -1,0 +1,4 @@
+# .wrfm fixtures that exercise specific byte-level parsing behavior must
+# preserve their bytes on commit. `core.autocrlf=input` rewrites CRLF to LF,
+# which would break the CRLF-tolerant parser test.
+crates/wrfm/tests/fixtures/valid/crlf.wrfm binary

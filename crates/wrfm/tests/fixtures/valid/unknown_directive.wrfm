@@ -1,0 +1,5 @@
+wrfm 2
+vertices 1   edges 0
+
+unknown_directive arg1 arg2
+v 0 0 0

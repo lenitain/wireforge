@@ -749,7 +749,7 @@ fn saved_file_is_canonical_v2() {
     );
     assert!(
         !content.contains("wireforge"),
-        "legacy comment dropped: {content}"
+        "no brand string in canonical output: {content}"
     );
     assert!(
         !content.contains("Name:"),

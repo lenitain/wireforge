@@ -1,0 +1,7 @@
+wrfm 2
+vertices 3   edges 0
+
+v 9 9 9
+group body
+  v 0 0 0
+  v 1 1 1

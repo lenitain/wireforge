@@ -1,0 +1,5 @@
+wrfm 2
+vertices 2   edges 0
+
+v nan 0 0
+v 0 nan nan

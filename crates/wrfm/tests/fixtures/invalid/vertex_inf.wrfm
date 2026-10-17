@@ -1,0 +1,6 @@
+wrfm 2
+vertices 3   edges 0
+
+v inf 0 0
+v -inf 1 0
+v 0 inf -inf

@@ -1,0 +1,309 @@
+# Manifest for the .wrfm v2 parser fixtures.
+#
+# Each `[section]` names a fixture file relative to this directory
+# (`valid/foo.wrfm` or `invalid/bar.wrfm`). Inside, `expect = accept`
+# declares that the parser must accept the file and produce the listed
+# counts; `expect = reject` declares that it must fail with the listed
+# error variant and details.
+#
+# Conventions for `expect = reject`:
+#   - `error`   : ParseError variant name (MissingMagic, MalformedMagic,
+#                 UnsupportedVersion, MissingHeader, MalformedHeader,
+#                 CountMismatch, InvalidVertex, InvalidEdge, MissingGroupName)
+#   - `detail`  : for InvalidVertex (MissingCoordinate / NotANumber /
+#                 NotFinite) or InvalidEdge (MissingIndex / NotAnIndex /
+#                 NegativeIndex / OutOfRange). REQUIRED for those variants.
+#   - `axis`    : 'x' / 'y' / 'z' when the error names an axis.
+#   - `which`   : 'Vertices' / 'Edges' for CountMismatch; 1 / 2 for edge
+#                 index errors.
+#   - `line`    : expected 1-based line number.
+#   - `column`  : expected 1-based character column (parser-implementation
+#                 detail; if specified, it pins the caret to that exact
+#                 column; omit if the column is incidental).
+#   - `token`   : the offending token as a literal string.
+
+# -----------------------------------------------------------------------------
+# valid: the parser accepts the file
+# -----------------------------------------------------------------------------
+
+[valid/empty.wrfm]
+expect = accept
+vertices = 0
+edges = 0
+groups = 0
+
+[valid/tetra.wrfm]
+expect = accept
+vertices = 4
+edges = 6
+groups = 0
+
+[valid/cube.wrfm]
+expect = accept
+vertices = 8
+edges = 12
+groups = 0
+
+[valid/grouped.wrfm]
+expect = accept
+vertices = 4
+edges = 4
+groups = 1
+
+[valid/multiple_groups.wrfm]
+expect = accept
+vertices = 5
+edges = 4
+groups = 2
+
+[valid/unnamed_section.wrfm]
+expect = accept
+vertices = 3
+edges = 0
+groups = 1
+
+[valid/empty_group.wrfm]
+expect = accept
+vertices = 1
+edges = 0
+groups = 1
+
+[valid/header_trailing_comment.wrfm]
+expect = accept
+vertices = 2
+edges = 1
+groups = 0
+
+[valid/magic_trailing_comment.wrfm]
+expect = accept
+vertices = 2
+edges = 1
+groups = 0
+
+[valid/bom.wrfm]
+expect = accept
+vertices = 2
+edges = 1
+groups = 0
+
+[valid/crlf.wrfm]
+expect = accept
+vertices = 2
+edges = 1
+groups = 0
+
+[valid/no_trailing_newline.wrfm]
+expect = accept
+vertices = 2
+edges = 1
+groups = 0
+
+[valid/extra_vertex_tokens.wrfm]
+expect = accept
+vertices = 1
+edges = 0
+groups = 0
+
+[valid/extra_edge_tokens.wrfm]
+expect = accept
+vertices = 2
+edges = 1
+groups = 0
+
+[valid/extra_group_tokens.wrfm]
+expect = accept
+vertices = 1
+edges = 0
+groups = 1
+
+[valid/unknown_directive.wrfm]
+expect = accept
+vertices = 1
+edges = 0
+groups = 0
+
+[valid/forward_ref.wrfm]
+expect = accept
+vertices = 2
+edges = 1
+groups = 0
+
+[valid/cross_group_ref.wrfm]
+expect = accept
+vertices = 3
+edges = 1
+groups = 2
+
+[valid/leading_plus_index.wrfm]
+expect = accept
+vertices = 2
+edges = 1
+groups = 0
+
+[valid/scientific_notation.wrfm]
+expect = accept
+vertices = 4
+edges = 0
+groups = 0
+
+[invalid/vertex_inf.wrfm]
+expect = reject
+error = InvalidVertex
+detail = NotFinite
+axis = x
+line = 4
+token = "inf"
+
+[invalid/vertex_nan.wrfm]
+expect = reject
+error = InvalidVertex
+detail = NotFinite
+axis = x
+line = 4
+token = "nan"
+
+[valid/blanks_before_header.wrfm]
+expect = accept
+vertices = 1
+edges = 0
+groups = 0
+
+# -----------------------------------------------------------------------------
+# invalid: the parser rejects the file with the listed error
+# -----------------------------------------------------------------------------
+
+[invalid/missing_magic_empty.wrfm]
+expect = reject
+error = MissingMagic
+line = 1
+
+[invalid/missing_magic_comment.wrfm]
+expect = reject
+error = MissingMagic
+line = 1
+
+[invalid/missing_magic_vertex.wrfm]
+expect = reject
+error = MissingMagic
+line = 1
+
+[invalid/malformed_magic_no_version.wrfm]
+expect = reject
+error = MalformedMagic
+line = 1
+token = ""
+
+[invalid/malformed_magic_not_int.wrfm]
+expect = reject
+error = MalformedMagic
+line = 1
+token = "2.0"
+
+[invalid/unsupported_version.wrfm]
+expect = reject
+error = UnsupportedVersion
+line = 1
+token = "3"
+
+[invalid/missing_header.wrfm]
+expect = reject
+error = MissingHeader
+line = 2
+
+[invalid/malformed_header_incomplete.wrfm]
+expect = reject
+error = MalformedHeader
+line = 2
+
+[invalid/malformed_header_bad_int.wrfm]
+expect = reject
+error = MalformedHeader
+line = 2
+token = "x"
+
+[invalid/malformed_header_typo.wrfm]
+expect = reject
+error = MalformedHeader
+line = 2
+token = "edge"
+
+[invalid/malformed_header_extras.wrfm]
+expect = reject
+error = MalformedHeader
+line = 2
+token = "extra"
+
+[invalid/count_mismatch_vertices.wrfm]
+expect = reject
+error = CountMismatch
+which = Vertices
+line = 2
+
+[invalid/count_mismatch_edges.wrfm]
+expect = reject
+error = CountMismatch
+which = Edges
+line = 8
+
+[invalid/vertex_missing_x.wrfm]
+expect = reject
+error = InvalidVertex
+detail = MissingCoordinate
+axis = x
+line = 4
+
+[invalid/vertex_missing_y.wrfm]
+expect = reject
+error = InvalidVertex
+detail = MissingCoordinate
+axis = y
+line = 4
+
+[invalid/vertex_missing_z.wrfm]
+expect = reject
+error = InvalidVertex
+detail = MissingCoordinate
+axis = z
+line = 4
+
+[invalid/vertex_not_number.wrfm]
+expect = reject
+error = InvalidVertex
+detail = NotANumber
+axis = z
+line = 4
+token = "abc"
+
+[invalid/edge_missing_second.wrfm]
+expect = reject
+error = InvalidEdge
+detail = MissingIndex
+which = 2
+line = 7
+
+[invalid/edge_not_index.wrfm]
+expect = reject
+error = InvalidEdge
+detail = NotAnIndex
+which = 1
+line = 7
+token = "a"
+
+[invalid/edge_negative_index.wrfm]
+expect = reject
+error = InvalidEdge
+detail = NegativeIndex
+which = 2
+line = 7
+
+[invalid/edge_out_of_range.wrfm]
+expect = reject
+error = InvalidEdge
+detail = OutOfRange
+which = 2
+line = 7
+
+[invalid/group_no_name.wrfm]
+expect = reject
+error = MissingGroupName
+line = 4

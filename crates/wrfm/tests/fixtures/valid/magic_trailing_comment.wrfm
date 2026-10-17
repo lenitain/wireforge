@@ -1,0 +1,7 @@
+wrfm 2 # a comment on the magic line is tolerated
+vertices 2   edges 1
+
+v 0 0 0
+v 1 1 1
+
+e 0 1

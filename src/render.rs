@@ -520,7 +520,10 @@ impl Rasterizer {
         // and that every camera key still works. It is also why the model
         // extent is never zero or NaN (see `extent_from_bounds`): the axes
         // would otherwise collapse onto the origin as a single dot.
-        let mut labels: Vec<(f64, f64, &str, u8)> = Vec::new();
+        // Axis labels — at most one per axis arm. A fixed stack buffer rather
+        // than a heap Vec, so a frame allocates nothing here.
+        let mut labels: [(f64, f64, &str, u8); 3] = [(0.0, 0.0, "", 0); 3];
+        let mut n_labels = 0usize;
         if show_axes {
             let axis_len = extent / 0.618;
             let scale = focal(px_h as f64, view.vfov);
@@ -531,6 +534,7 @@ impl Rasterizer {
                 ((0.0, axis_len, 0.0), "Y", Ink::Yellow as u8),
                 ((0.0, 0.0, axis_len), "Z", Ink::LightBlue as u8),
             ];
+            debug_assert_eq!(ends.len(), labels.len());
             for (tip, label, color) in ends {
                 let end = cam.camera_space(tip);
                 let end_ok = end[2] > wrfm_raster::projection::NEAR;
@@ -564,7 +568,8 @@ impl Rasterizer {
                 if !point_is_on_canvas(lx, ly, px_w, px_h) {
                     continue;
                 }
-                labels.push((lx, ly, label, color));
+                labels[n_labels] = (lx, ly, label, color);
+                n_labels += 1;
             }
         }
 
@@ -588,7 +593,7 @@ impl Rasterizer {
 
         // Labels are drawn ON TOP of the rasterized dots, exactly like
         // ratatui's canvas draws labels after the layers.
-        for (ex, ey, label, color) in labels {
+        for &(ex, ey, label, color) in &labels[..n_labels] {
             self.place_label(ex, ey, label, color, px_w, px_h, rx, ry, screen);
         }
     }

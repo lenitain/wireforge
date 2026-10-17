@@ -717,11 +717,18 @@ fn load_model_from_text(name: &str, text: &str) -> Result<(Model, String), Strin
 /// belongs in one place. What is left is deliberately *only* telemetry: this
 /// line is routinely wider than the terminal, so anything appended to it (as
 /// the old `[?] keys` hint was) is the first thing clipped.
-fn telemetry_line(view: &ViewState) -> String {
-    format!(
+///
+/// The line is written into `out` (cleared first) instead of being returned as
+/// a fresh `String`, so a frame reuses one buffer rather than allocating.
+fn write_telemetry_line(view: &ViewState, out: &mut String) {
+    use std::fmt::Write as _;
+    out.clear();
+    write!(
+        out,
         "yaw={:.2} pitch={:.2} roll={:.2} dist={:.2} pan=({:.2},{:.2})",
         view.yaw, view.pitch, view.roll, view.dist, view.pan_x, view.pan_y
     )
+    .expect("writing telemetry into a String cannot fail");
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,6 +1533,9 @@ struct Engine {
     screen: render::Screen,
     raster: render::Rasterizer,
     hud_buf: Option<Buffer>,
+    /// Row 0's text, kept between frames: [`write_telemetry_line`] fills it in
+    /// place, so a frame reuses one buffer instead of allocating a fresh one.
+    telemetry_buf: String,
     /// The statusline, kept between frames. Its look depends on a handful of
     /// values, so it is rebuilt when one of them changes rather than every
     /// frame — and rebuilding is the common case only while a modifier is
@@ -1549,6 +1559,7 @@ impl Engine {
             screen: render::Screen::new(w, h),
             raster: render::Rasterizer::new(),
             hud_buf: None,
+            telemetry_buf: String::new(),
             status: None,
         };
         // No Resize event precedes the first frame, so the opening frame needs
@@ -1703,7 +1714,7 @@ fn compose_frame(app: &mut App, engine: &mut Engine) {
     }
     let w16 = w as u16;
     let h16 = h as u16;
-    let row0 = telemetry_line(&app.view);
+    write_telemetry_line(&app.view, &mut engine.telemetry_buf);
     let (canvas_x, canvas_top, canvas_w, canvas_h) = model_canvas_rect(w, h);
     let canvas_top = canvas_top as u16;
     let canvas_h = canvas_h as u16;
@@ -1725,7 +1736,7 @@ fn compose_frame(app: &mut App, engine: &mut Engine) {
     // goes straight to the screen later, once nothing else can paint over it.
     {
         let hud = engine.hud_buf.as_mut().unwrap();
-        Paragraph::new(row0).render(Rect::new(0, 0, w16, 1), hud);
+        Paragraph::new(engine.telemetry_buf.as_str()).render(Rect::new(0, 0, w16, 1), hud);
     }
 
     // The panel's rect on screen, when it is up. The model is rasterized
@@ -2305,7 +2316,8 @@ mod tests {
             yaw: 0.5,
             ..ViewState::default()
         };
-        let row0 = telemetry_line(&view);
+        let mut row0 = String::new();
+        write_telemetry_line(&view, &mut row0);
         assert!(row0.starts_with("yaw=0.50"), "camera leads the row: {row0}");
         assert!(
             row0.contains("pitch=") && row0.contains("roll="),
@@ -2804,8 +2816,10 @@ mod tests {
             status_text(&app, 80).starts_with(" no file "),
             "the pill names the empty state"
         );
+        let mut row0 = String::new();
+        write_telemetry_line(&app.view, &mut row0);
         assert!(
-            telemetry_line(&app.view).contains("dist="),
+            row0.contains("dist="),
             "row 0 keeps reporting the camera either way"
         );
     }

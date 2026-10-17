@@ -182,25 +182,6 @@ const fn canonical_key(code: KeyCode, mods: KeyModifiers) -> (KeyCode, bool) {
     }
 }
 
-/// The task a binding belongs to. Grouping is by what the operator wants to
-/// *do*, never by which modifier the chord wears: "how do I move it?" is a
-/// question about the task, while "what does Shift do?" is a question about
-/// the parser. The statusline's modifier hints key off this; the help overlay
-/// is written by hand and does not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Group {
-    /// Turning the model on the world's axes (h / l / k / j / r / e).
-    Rotate,
-    /// Sliding the model in the world's plane (Shift + hjkl, = / -).
-    Move,
-    /// Turning the model on its own axes (Ctrl + hjkl / r / e).
-    Local,
-    /// Where the model sits on screen (c).
-    Frame,
-    /// Session control (Space / Tab / ? / q).
-    Session,
-}
-
 /// One way to press a binding: the terminal key event *as the terminal
 /// reports it*, plus the label shown to the operator.
 ///
@@ -257,7 +238,6 @@ const fn ctrl(code: KeyCode) -> Chord {
 #[derive(Clone, Copy)]
 struct Binding {
     action: Action,
-    group: Group,
     /// Every documented way to press it.
     chords: &'static [Chord],
 }
@@ -270,22 +250,18 @@ const BINDINGS: &[Binding] = &[
     // --- Rotate: the world's axes ---
     Binding {
         action: Action::Motion(Motion::YawLeft),
-        group: Group::Rotate,
         chords: &[key(KeyCode::Char('h')), key(KeyCode::Left)],
     },
     Binding {
         action: Action::Motion(Motion::YawRight),
-        group: Group::Rotate,
         chords: &[key(KeyCode::Char('l')), key(KeyCode::Right)],
     },
     Binding {
         action: Action::Motion(Motion::PitchUp),
-        group: Group::Rotate,
         chords: &[key(KeyCode::Char('k')), key(KeyCode::Up)],
     },
     Binding {
         action: Action::Motion(Motion::PitchDown),
-        group: Group::Rotate,
         chords: &[key(KeyCode::Char('j')), key(KeyCode::Down)],
     },
     // `d` reads left and `f` reads right, the way hjkl reads spatially: on a
@@ -293,93 +269,76 @@ const BINDINGS: &[Binding] = &[
     // anticlockwise (its left side dips) and `f` rolls it clockwise.
     Binding {
         action: Action::Motion(Motion::RollMinus),
-        group: Group::Rotate,
         chords: &[key(KeyCode::Char('d'))],
     },
     Binding {
         action: Action::Motion(Motion::RollPlus),
-        group: Group::Rotate,
         chords: &[key(KeyCode::Char('f'))],
     },
     // --- Move: slide in the world's plane ---
     Binding {
         action: Action::Motion(Motion::MoveLeft),
-        group: Group::Move,
         chords: &[shift(KeyCode::Char('H')), shift(KeyCode::Left)],
     },
     Binding {
         action: Action::Motion(Motion::MoveRight),
-        group: Group::Move,
         chords: &[shift(KeyCode::Char('L')), shift(KeyCode::Right)],
     },
     Binding {
         action: Action::Motion(Motion::MoveUp),
-        group: Group::Move,
         chords: &[shift(KeyCode::Char('K')), shift(KeyCode::Up)],
     },
     Binding {
         action: Action::Motion(Motion::MoveDown),
-        group: Group::Move,
         chords: &[shift(KeyCode::Char('J')), shift(KeyCode::Down)],
     },
     Binding {
         action: Action::Motion(Motion::MoveForward),
-        group: Group::Move,
         // `+` is how several layouts spell the shifted `=`; it folds to `=`.
         chords: &[key(KeyCode::Char('=')), key(KeyCode::Char('+'))],
     },
     Binding {
         action: Action::Motion(Motion::MoveBack),
-        group: Group::Move,
         // `_` is the shifted `-` on several layouts; it folds to `-`.
         chords: &[key(KeyCode::Char('-')), key(KeyCode::Char('_'))],
     },
     // --- Local: the model's own axes ---
     Binding {
         action: Action::Motion(Motion::LocalYawLeft),
-        group: Group::Local,
         chords: &[ctrl(KeyCode::Char('h')), ctrl(KeyCode::Left)],
     },
     Binding {
         action: Action::Motion(Motion::LocalYawRight),
-        group: Group::Local,
         chords: &[ctrl(KeyCode::Char('l')), ctrl(KeyCode::Right)],
     },
     Binding {
         action: Action::Motion(Motion::LocalPitchUp),
-        group: Group::Local,
         chords: &[ctrl(KeyCode::Char('k')), ctrl(KeyCode::Up)],
     },
     Binding {
         action: Action::Motion(Motion::LocalPitchDown),
-        group: Group::Local,
         chords: &[ctrl(KeyCode::Char('j')), ctrl(KeyCode::Down)],
     },
     Binding {
         action: Action::Motion(Motion::LocalRollMinus),
-        group: Group::Local,
         chords: &[ctrl(KeyCode::Char('d'))],
     },
     Binding {
         action: Action::Motion(Motion::LocalRollPlus),
-        group: Group::Local,
         chords: &[ctrl(KeyCode::Char('f'))],
     },
     // --- Frame: where it sits on screen ---
     Binding {
         action: Action::Reset,
-        group: Group::Frame,
         chords: &[key(KeyCode::Char('r'))],
     },
     // --- Session ---
     Binding {
         action: Action::Spin,
-        group: Group::Session,
         chords: &[key(KeyCode::Char(' '))],
     },
     Binding {
         action: Action::Axes,
-        group: Group::Session,
         chords: &[
             key(KeyCode::Tab),
             // A legacy terminal reports Shift+Tab as BackTab; kitty reports
@@ -389,12 +348,10 @@ const BINDINGS: &[Binding] = &[
     },
     Binding {
         action: Action::Help,
-        group: Group::Session,
         chords: &[key(KeyCode::Char('?'))],
     },
     Binding {
         action: Action::Quit,
-        group: Group::Session,
         chords: &[
             key(KeyCode::Char('q')),
             key(KeyCode::Esc),
@@ -766,14 +723,6 @@ fn telemetry_line(view: &ViewState) -> String {
     )
 }
 
-/// The order the statusline's modifier hints list their groups in. This is the
-/// *hints'* split, not the overlay's: the help page has its own hand-written
-/// columns below and reads nothing from here.
-const HINT_GROUPS: &[&[Group]] = &[
-    &[Group::Rotate, Group::Move],
-    &[Group::Local, Group::Frame, Group::Session],
-];
-
 // ---------------------------------------------------------------------------
 // The help overlay
 // ---------------------------------------------------------------------------
@@ -1062,64 +1011,6 @@ impl Item {
 ///
 /// Empty when nothing is held, or when what is held unlocks nothing (Alt and
 /// Super are free), which leaves the everyday hints in place.
-fn modifier_hint(mods: KeyModifiers) -> Vec<Item> {
-    // Control wins when both are down: it is the one with more to say here.
-    let (modifier, name) = if mods.contains(KeyModifiers::CONTROL) {
-        (KeyModifiers::CONTROL, "Ctrl+")
-    } else if mods.contains(KeyModifiers::SHIFT) {
-        (KeyModifiers::SHIFT, "Shift+")
-    } else {
-        return Vec::new();
-    };
-    let mut items = Vec::new();
-    // Group order follows HINT_GROUPS, which is the order the keys are
-    // documented in.
-    for group in HINT_GROUPS.iter().flat_map(|column| column.iter()).copied() {
-        let keys: Vec<String> = BINDINGS
-            .iter()
-            .filter(|b| b.group == group)
-            .map(|b| &b.chords[0])
-            .filter(|c| c.mods.contains(modifier))
-            .map(chord_key)
-            .collect();
-        if !keys.is_empty() {
-            // The same key / verb split as the everyday hints.
-            items.push(Item {
-                runs: vec![
-                    (format!("{name}{}", keys.join("/")), ACCENT),
-                    (format!(" {}", group_verb(group)), BODY),
-                ],
-            });
-        }
-    }
-    items
-}
-
-/// What a group does, in the few words the strip can afford. The overlay's
-/// headings spell the same thing out for a reader who has stopped to read;
-/// this is for a glance.
-fn group_verb(g: Group) -> &'static str {
-    match g {
-        Group::Rotate => "turn the view",
-        Group::Move => "pan the view",
-        Group::Local => "turn its own axes",
-        Group::Frame => "frame the model",
-        Group::Session => "session control",
-    }
-}
-
-/// The key half of a chord's label, as `Chord::label` already spelled it:
-/// the same case shows up in the help overlay and the statusline so a reader
-/// never has to remember which surface uses which shape.
-fn chord_key(c: &Chord) -> String {
-    let label = c.label();
-    ["Ctrl+", "Shift+"]
-        .iter()
-        .find_map(|prefix| label.strip_prefix(prefix))
-        .unwrap_or(&label)
-        .to_string()
-}
-
 /// Which end of the strip a section sits at, and so which way its seams point:
 /// a left-hand block reads left to right and wedges rightwards, while the
 /// right-hand hints read right to left and wedge leftwards.
@@ -1214,7 +1105,7 @@ fn status_cells_for(app: &App, width: u16) -> Vec<(char, Color, Color)> {
 /// section's colour to the next. Left to right:
 ///
 /// ```text
-///  model.wrfm ▶ ● SPIN  ● AXES ▶        ◀ ? help  q quit  Space spin  Tab axes
+///  model.wrfm ▶ ● SPIN  ● AXES ▶        ◀ ? help  q quit
 /// ```
 ///
 /// The pill names the model — the only place it appears, which is why Row 0 is
@@ -1231,12 +1122,7 @@ fn status_cells_for(app: &App, width: u16) -> Vec<(char, Color, Color)> {
 fn status_line(app: &App, width: u16) -> Line<'static> {
     /// The hints, most useful first: the order they appear in, and the order
     /// they are shed in a narrow terminal.
-    const HINTS: &[(Action, &str)] = &[
-        (Action::Help, "help"),
-        (Action::Quit, "quit"),
-        (Action::Spin, "spin"),
-        (Action::Axes, "axes"),
-    ];
+    const HINTS: &[(Action, &str)] = &[(Action::Help, "help"), (Action::Quit, "quit")];
     let width = width as usize;
     // Narrower than the pill's own padding leaves nothing to draw but the
     // strip itself; an empty pill would just be a green blob.
@@ -1267,18 +1153,10 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
         ],
     };
 
-    // Hold a modifier and the hints become that modifier's chords: the strip
-    // answers the question the hand is already asking. Nothing held — or a
-    // terminal that never reports a bare modifier — leaves the everyday hints.
-    let held = modifier_hint(app.held_modifiers());
-    let mut hints: Vec<Item> = if held.is_empty() {
-        HINTS
-            .iter()
-            .filter_map(|(action, label)| hint(*action, label))
-            .collect()
-    } else {
-        held
-    };
+    let mut hints: Vec<Item> = HINTS
+        .iter()
+        .filter_map(|(action, label)| hint(*action, label))
+        .collect();
     let lamps = Section {
         items: vec![lamp(app.auto_spin, "SPIN"), lamp(app.show_axes, "AXES")],
         ground: LAMP,
@@ -1650,7 +1528,6 @@ struct StatusCache {
     named: String,
     spin: bool,
     axes: bool,
-    mods: KeyModifiers,
     width: u16,
     cells: Vec<(char, Color, Color)>,
 }
@@ -1698,12 +1575,10 @@ impl Engine {
     /// copy it back out again would cost more than the layout it saves.
     fn paint_status(&mut self, app: &App, width: u16, row: usize) {
         let named = app.strip_label.as_deref().unwrap_or(&app.name);
-        let mods = app.held_modifiers();
         let stale = self.status.as_ref().is_none_or(|cache| {
             cache.named != named
                 || cache.spin != app.auto_spin
                 || cache.axes != app.show_axes
-                || cache.mods != mods
                 || cache.width != width
         });
         if stale {
@@ -1711,7 +1586,6 @@ impl Engine {
                 named: named.to_string(),
                 spin: app.auto_spin,
                 axes: app.show_axes,
-                mods,
                 width,
                 cells: status_cells_for(app, width),
             });
@@ -3028,91 +2902,6 @@ mod tests {
     }
 
     #[test]
-    fn a_held_modifier_switches_the_strip_hints() {
-        let mut app = status_app("cube");
-        let everyday = status_text(&app, 100);
-        assert!(
-            everyday.contains("? help"),
-            "hints by default: {everyday:?}"
-        );
-
-        app.handle_input(modifier_event(
-            ModifierKeyCode::LeftControl,
-            KeyEventKind::Press,
-        ));
-        let ctrl = status_text(&app, 100);
-        assert!(ctrl.contains("Ctrl+h/l/k/j/d/f"), "the Ctrl keys: {ctrl:?}");
-        assert!(
-            !ctrl.contains("? help"),
-            "the everyday hints step aside: {ctrl:?}"
-        );
-
-        app.handle_input(modifier_event(
-            ModifierKeyCode::LeftControl,
-            KeyEventKind::Release,
-        ));
-        assert_eq!(
-            status_text(&app, 100),
-            everyday,
-            "and they come back on release"
-        );
-
-        app.handle_input(modifier_event(
-            ModifierKeyCode::RightShift,
-            KeyEventKind::Press,
-        ));
-        let shift = status_text(&app, 100);
-        assert!(
-            shift.contains("Shift+h/l/k/j pan the view"),
-            "the Shift keys: {shift:?}"
-        );
-        assert!(
-            !shift.contains("frame the model"),
-            "no binding wears Shift in the Frame group any more: {shift:?}"
-        );
-    }
-
-    #[test]
-    fn a_modifier_hint_only_names_keys_that_modifier_binds() {
-        // The hint is derived from BINDINGS, so this pins the derivation: every
-        // key it lists must resolve to a real action *with that modifier*, and
-        // every chord wearing the modifier must be listed — otherwise the strip
-        // would be advertising a keyboard that does not exist.
-        for (mods, name) in [
-            (KeyModifiers::CONTROL, "Ctrl+"),
-            (KeyModifiers::SHIFT, "Shift+"),
-        ] {
-            let rows = modifier_hint(mods);
-            assert!(!rows.is_empty(), "a hint for a bound modifier");
-            let mut hinted = 0;
-            for row in rows {
-                let text: String = row.runs.iter().map(|(t, _)| t.as_str()).collect();
-                assert!(text.starts_with(name), "{text:?} must open with {name:?}");
-                let keys = text[name.len()..].split(' ').next().unwrap();
-                for key in keys.split('/') {
-                    // A shifted letter is bound as its upper-case glyph.
-                    let glyph = if mods.contains(KeyModifiers::SHIFT) {
-                        key.to_uppercase()
-                    } else {
-                        key.to_string()
-                    };
-                    let code = KeyCode::Char(glyph.chars().next().expect("one char"));
-                    assert!(
-                        resolve_key_event(code, mods).is_some(),
-                        "{name}{key} is hinted but unbound"
-                    );
-                    hinted += 1;
-                }
-            }
-            let bound = BINDINGS
-                .iter()
-                .filter(|b| b.chords[0].mods.contains(mods))
-                .count();
-            assert_eq!(hinted, bound, "every {name} chord is hinted once");
-        }
-    }
-
-    #[test]
     fn status_line_fills_the_row_exactly() {
         // The strip is the one place Wireforge paints a background, so it has
         // to cover the row edge to edge: a cell short leaves a hole in the
@@ -3210,12 +2999,7 @@ mod tests {
         // strip advertising a key that does nothing.
         let app = status_app("cube");
         let text = status_text(&app, 100);
-        for (action, label) in [
-            (Action::Help, "help"),
-            (Action::Quit, "quit"),
-            (Action::Spin, "spin"),
-            (Action::Axes, "axes"),
-        ] {
+        for (action, label) in [(Action::Help, "help"), (Action::Quit, "quit")] {
             let b = BINDINGS.iter().find(|b| b.action == action).expect("bound");
             let want = format!("{} {label}", b.chords[0].label());
             assert!(text.contains(&want), "{want:?} missing from {text:?}");
@@ -3227,17 +3011,17 @@ mod tests {
         let app = status_app("wireforge.wrfm");
         // Roomy: every hint is on the strip.
         let wide = status_text(&app, 100);
-        for hint in ["? help", "q quit", "Space spin", "Tab axes"] {
+        for hint in ["? help", "q quit"] {
             assert!(
                 wide.contains(hint),
                 "{hint:?} missing at 100 cols: {wide:?}"
             );
         }
-        // Narrow: the hints go first, and the name outlives them.
+        // Narrow: the hints go first, then the name is shortened.
         let narrow = status_text(&app, 40);
         assert!(
-            !narrow.contains("Tab axes"),
-            "the least useful hint sheds first: {narrow:?}"
+            !narrow.contains("? help") && !narrow.contains("q quit"),
+            "the hints shed first: {narrow:?}"
         );
         assert!(
             narrow.contains("wireforge.wrfm"),
@@ -3245,7 +3029,6 @@ mod tests {
         );
         // Narrower still: the lamps go, and a cut name is marked as cut.
         let tiny = status_text(&app, 14);
-        assert!(!tiny.contains("SPIN"), "the lamps go next: {tiny:?}");
         assert!(tiny.contains('…'), "a cut name is marked: {tiny:?}");
     }
 

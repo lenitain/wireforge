@@ -66,29 +66,15 @@ there. The middle is the model itself. The last row is a statusline strip,
 which is where that name lives:
 
 ```text
- model.wrfm ▶ ● SPIN  ● AXES ▶        ◀ ? help  q quit  Space spin  Tab axes
+ model.wrfm ▶ ● SPIN  ● AXES ▶        ◀ ? help  q quit
 ```
 
 The name sits on the accent colour, the two lamps report whether the model is
 spinning and whether the axes are drawn (a lit dot means on), and the
 right-hand hints carry the everyday chords. The strip fills the row edge to
 edge, and the pill yields at most half of it so a long name can never crowd
-out the rest. When the terminal is too narrow for all of it, hints are dropped
-from the right, then the lamps, then the name is shortened with `…`. `?`
-always opens the full list.
-
-The hints also follow a held modifier, so the strip answers the question the
-hand is already asking:
-
-```text
- model.wrfm ▶ ● SPIN  ● AXES ▶        ◀ Ctrl+h/l/k/j/d/f turn its own axes
-```
-
-Press `Ctrl` and the everyday chords give way to the chords `Ctrl` unlocks;
-let it go and they come back. This needs a terminal that reports the modifier
-key on its own — the kitty keyboard protocol, which foot, kitty, wezterm and
-ghostty speak. A terminal that does not report modifiers simply keeps the
-everyday hints, so nothing is lost where the protocol is missing.
+out the rest. When the terminal is too narrow for all of it, the lamps are
+dropped, then the name is shortened with `…`. `?` always opens the full list.
 
 ### Stream input
 

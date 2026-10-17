@@ -2528,7 +2528,7 @@ fn render_vfov_is_echoed_and_wider_vfov_fills_more() {
         stderr(&default)
     );
     let head = stdout(&default).lines().next().unwrap_or("").to_string();
-    assert!(head.contains("vfov=1 rad"), "header echoes vfov: {head}");
+    assert!(head.contains("vfov=0.5 rad"), "header echoes vfov: {head}");
 
     let narrow = run_render("0.5");
     let wide = run_render("2.0");

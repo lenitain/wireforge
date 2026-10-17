@@ -8,7 +8,7 @@ use crate::Model;
 /// follows from the canvas aspect ratio and is never clamped (wireforge
 /// never needs to fill the screen — content outside the frustum is simply
 /// not drawn).
-pub const DEFAULT_VFOV: f64 = 1.0;
+pub const DEFAULT_VFOV: f64 = 0.5;
 
 /// Upper bound on a caller-supplied vertical FOV (radians): ~172°, wide
 /// enough for any sane view and past which `tan(vfov/2)` explodes. CLIs

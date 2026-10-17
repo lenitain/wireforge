@@ -185,7 +185,7 @@ nothing while `--auto-dist` is on, and it is on by default:
 wrfm render model.wrfm --views front --auto-dist false --dist 12
 ```
 
-`--vfov N` sets the vertical field of view in **radians** (default 1.0,
+`--vfov N` sets the vertical field of view in **radians** (default 0.5,
 valid range (0, 3]); it feeds both the focal length and the auto camera
 distance. The vertical axis is the only one you set: the horizontal field
 follows from the canvas aspect ratio and is never clamped — content outside

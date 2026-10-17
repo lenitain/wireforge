@@ -118,7 +118,7 @@ wrfm edit model.wrfm --extract-group cabinet | wrfm transform - --scale 2 | wire
 
 ### Field of view
 
-`--vfov N` sets the vertical field of view in **radians** (default 1.0, valid
+`--vfov N` sets the vertical field of view in **radians** (default 0.5, valid
 range (0, 3]). It is fixed for the session — it feeds the focal length and
 the auto-fit camera distance at start-up.
 

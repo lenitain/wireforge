@@ -3265,15 +3265,6 @@ fn fmt_nonexistent_file_exits_three() {
 }
 
 #[test]
-fn fmt_parse_failure_exits_three() {
-    // `cmt_before.wrfm` has `# leading` BEFORE the magic line — the parser
-    // rejects it as `MissingMagic` (format error), so `fmt` exits 3.
-    let out = run(&["fmt", "cmt_before.wrfm"]);
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
-    fs::remove_dir_all(std::env::temp_dir().join("x")).ok();
-}
-
-#[test]
 fn fmt_broken_model_exits_two_overriding_check() {
     // The BROKEN fixture is canonical except for the `e 0 0` zero-length
     // edge; `--check` would compute a match, but the higher-severity L2

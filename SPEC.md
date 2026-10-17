@@ -225,12 +225,3 @@ e 3 1
 The authoritative prose specification lives with the library in
 [crates/wrfm/README.md](crates/wrfm/README.md). It covers BOM and whitespace
 rules, the `f64` round-trip guarantee, and the parser's error behaviour.
-
-**Version history.** v2 is the current format. v1 was the format of `wrfm`
-0.4.0: no magic line, no counts header, no groups, edge indices unchecked and
-errors reported as plain strings. v1 files are not read: without the magic
-line they fail as `MissingMagic`, and a file stamped with another version
-fails as `UnsupportedVersion`. To migrate one, prepend `wrfm 2` and a
-`vertices <N>   edges <M>` header with the file's actual counts. The
-[crate README](crates/wrfm/README.md#format-versions) tabulates every
-difference.

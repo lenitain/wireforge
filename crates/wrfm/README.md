@@ -7,79 +7,35 @@ This crate provides a `WrfmModel` struct to load, manipulate, and save
 models of vertices and edges. It is the parser used by `wireforge`, the TUI
 viewer, and by the `wrfm` command line tool.
 
-## Format versions
+**The authoritative format specification** lives at
+[`docs/wrfm-spec.md`](docs/wrfm-spec.md) inside this crate, and
+is reproduced online at <https://github.com/lenitain/wireforge/blob/main/crates/wrfm/docs/wrfm-spec.md>.
+This README covers the library API only; for the byte-level syntax,
+EBNF grammar, error variants, and canonical output form, see the spec.
 
-The format has two versions. **v2 is current**; v1 is the format of `wrfm`
-0.4.0, which predates the version marker.
+## Library overview
 
-| | v1 (0.4.0) | v2 (current) |
-| :--- | :--- | :--- |
-| Version marker | — | `wrfm 2` magic line, required first |
-| Counts header | — | `vertices <N>   edges <M>`, required and enforced |
-| Groups | — (`group` lines are skipped) | `group <name>` sections |
-| Edge indices | unvalidated (out-of-range indices parse silently) | checked against the vertex count |
-| Unknown lines | skipped anywhere | blanks and comments anywhere; unknown directives only after the counts header |
-| Parse failures | a plain `String` | structured `ParseError` with line and column |
-| Writing | `# ComChan wireframe format` comment, `{:.6}` coordinates | canonical v2, shortest round-trip `f64` |
+`WrfmModel` is a parsed v2 model: a display `name`, an ordered list of
+vertices, an unordered set of edges between them (both global), the
+parsed format version (`2`), and an optional list of named groups over
+the global vertex list. The model is the contract between the file on
+disk and every consumer (viewer, CLI, third-party tool).
 
-The version bump matters. v1 could not tell a valid model from a truncated or
-mangled one: it declared no counts and checked no indices, so a half-written
-file parsed into a different, broken model. v2 makes the file self-describing
-and reports such files as errors.
+```rust
+use wrfm::{Group, WrfmModel};
 
-Only v2 is read. A v1 file is recognizable by the absence of a marker: it
-opens with `#` comments (0.4.0 writes `# ComChan wireframe format`) or
-directly with `v` / `e` lines. Such a file is `MissingMagic`; a file stamped
-with any other version (including `wrfm 1`) is `UnsupportedVersion`. To
-migrate a v1 file, prepend the magic line and a counts header holding the
-file's actual `v` / `e` totals:
-
-```text
-wrfm 2
-vertices <N>   edges <M>
-... (the v / e lines, unchanged)
+let mut model = WrfmModel::new("cube");
+model.vertices.push((-1.0, -1.0, -1.0));
+model.vertices.push(( 1.0, -1.0, -1.0));
+model.edges.push((0, 1));
+model.groups.push(Group {
+    name: "base".to_string(),
+    vertex_start: 0,
+    vertex_end: 2,
+});
+let text = model.to_string();
+assert!(text.starts_with("wrfm 2\nvertices 2   edges 1\n"));
 ```
-
-## The `.wrfm` Format
-
-`.wrfm` is a plain text format for 3D wireframes. A v2 file is UTF-8 text with
-one element per line:
-
-* `wrfm <version>` — magic line, required as the first line of the file (a
-  UTF-8 BOM is tolerated before it; nothing else may precede it). Version `2`
-  is the current format; other versions are rejected.
-* `vertices <N>   edges <M>` — counts header, required before any content. A
-  file whose actual `v` / `e` lines disagree with these counts is rejected.
-* `v <x> <y> <z>` — a vertex in 3D space (full f64 precision).
-* `e <index1> <index2>` — an edge connecting two vertices (0-indexed, global).
-* `group <name>` — opens a named section; the following `v` lines belong to
-  it until the next `group`. Groups are optional and organize the global
-  vertex list.
-* Lines starting with `#` are ignored as comments (except before the magic
-  line).
-
-### Example File (`quad.wrfm`)
-
-A single square face, in a group of its own:
-
-```text
-wrfm 2
-vertices 4   edges 4
-
-group bottom
-  v -1 -1 -1
-  v 1 -1 -1
-  v 1 1 -1
-  v -1 1 -1
-  e 0 1
-  e 1 2
-  e 2 3
-  e 3 0
-```
-
-Coordinates are parsed and serialized at full `f64` precision with the
-shortest round-trip representation, so `1.0 / 3.0` round-trips as
-`0.3333333333333333` and is never quantized.
 
 ## Usage
 

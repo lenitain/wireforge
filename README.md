@@ -25,8 +25,7 @@ The repository holds the viewer and the pieces around it:
 - **`wireforge`** — the viewer, and the main program here. Open a file and
   turn it around with the keyboard; run it with no file and the empty space
   still comes up, XYZ axes and all.
-- **`.wrfm`** — the format the viewer reads (v2; files from the old `wrfm`
-  0.4.0 are not read).
+- **`.wrfm`** — the format the viewer reads. The current version is v2.
 - **[`wrfm`](crates/wrfm)** — a zero-dependency Rust library that parses and
   serializes that format, with `no_std` support and exact `f64` round-trips.
   The viewer and the CLI read models through it.

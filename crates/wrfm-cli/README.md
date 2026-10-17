@@ -225,6 +225,7 @@ wrfm transform model.wrfm --scale 2    # affine transforms, printed to stdout
 wrfm edit model.wrfm --delete-vertices 0,1   # topology edits (--dedupe / --weld TOL)
 wrfm convert model.obj                 # OBJ -> wrfm (input format detected from the content)
 wrfm diff a.wrfm b.wrfm --format json  # structured or density-grid diff
+wrfm fmt model.wrfm                   # re-emit in canonical v2 surface form (--check / -q)
 wrfm format                            # print the .wrfm v2 spec itself
 ```
 
@@ -262,6 +263,15 @@ wrfm group m.wrfm | jq -r '.groups[] | "\(.name):\(.verdict)"'
 # one-line check summary for logs (was `check --quiet`)
 wrfm check m.wrfm | head -1
 # warn: model (278 vertices, 529 edges)
+
+# canonical-form CI gate (mirrors cargo fmt --check -q): exit 0 if the file
+# is already in canonical v2 surface form, exit 1 if re-canonicalization
+# would change bytes — no stdout either way
+wrfm fmt *.wrfm --check -q
+
+# see what canonicalization would change (no unified diff yet; pipe the
+# canonical output into diff yourself)
+diff <(wrfm fmt file.wrfm --check) file.wrfm
 
 # render a group as its own model (compare parts without touching the file)
 wrfm edit m.wrfm --extract-group g | wrfm render -

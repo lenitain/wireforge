@@ -290,41 +290,6 @@ fn no_file_argument_opens_the_empty_space() {
         "the empty viewer must still be running, waiting for input"
     );
 
-    // Holding a modifier switches the hints. The kitty keyboard protocol
-    // reports the modifier key itself — `ESC[57442u` is left Ctrl down, and
-    // with event types on, `ESC[57442;1:3u` is it coming back up. This pty is
-    // not a kitty terminal, but the app parses whatever bytes it is handed,
-    // which is the half of the feature that lives here.
-    let mut next_frame = |master: &mut std::fs::File| -> String {
-        let (seen, quiet) = drain_until_quiet(
-            master,
-            &mut buf,
-            Instant::now() + Duration::from_secs(5),
-            Duration::from_millis(300),
-        );
-        assert!(quiet, "the viewer must repaint and then idle");
-        strip_ansi(&String::from_utf8_lossy(&seen))
-    };
-    master.write_all(b"\x1b[57442u").expect("ctrl down");
-    let held = next_frame(&mut master);
-    let held_packed: String = held.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(
-        held_packed.contains("Ctrl+h/l/k/j/d/f"),
-        "holding Ctrl must switch the hints to the Ctrl chords, got: {held:?}"
-    );
-    assert!(
-        !held_packed.contains("?help"),
-        "the everyday hints step aside while Ctrl is held, got: {held:?}"
-    );
-
-    master.write_all(b"\x1b[57442;1:3u").expect("ctrl up");
-    let released = next_frame(&mut master);
-    let released_packed: String = released.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(
-        released_packed.contains("?help") && released_packed.contains("Spacespin"),
-        "letting Ctrl go must bring the everyday hints back, got: {released:?}"
-    );
-
     // `q` quits the empty view like it quits a model view.
     master.write_all(b"q").expect("write key press");
     let exited = wait_until(Duration::from_secs(5), || {

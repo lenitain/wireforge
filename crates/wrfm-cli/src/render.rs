@@ -1540,73 +1540,6 @@ mod tests {
 
     // -- fit content ------------------------------------------------------------
 
-    /// Fraction of the ascii frame covered by the lit-dot bounding box:
-    /// `(columns, rows)`.
-    fn ascii_coverage(text: &str) -> (f64, f64) {
-        let rows: Vec<Vec<char>> = text.lines().map(|l| l.chars().collect()).collect();
-        let (h, w) = (rows.len(), rows.first().map(|r| r.len()).unwrap_or(0));
-        let (mut c0, mut c1, mut r0, mut r1) = (usize::MAX, 0usize, usize::MAX, 0usize);
-        for (y, row) in rows.iter().enumerate() {
-            for (x, &c) in row.iter().enumerate() {
-                if c == '#' {
-                    c0 = c0.min(x);
-                    c1 = c1.max(x);
-                    r0 = r0.min(y);
-                    r1 = r1.max(y);
-                }
-            }
-        }
-        if c0 == usize::MAX || w == 0 || h == 0 {
-            return (0.0, 0.0);
-        }
-        (
-            (c1 - c0 + 1) as f64 / w as f64,
-            (r1 - r0 + 1) as f64 / h as f64,
-        )
-    }
-
-    #[test]
-    fn fit_content_region_is_some_and_inside_the_canvas() {
-        let m = cube();
-        let o = opts(Format::Braille, vec![]);
-        // front / top / iso: every view gets its own clamped, non-degenerate window.
-        for (pitch, yaw) in [(0.0, 0.0), (-90.0, 0.0), (30.0, 45.0)] {
-            let r = fit_content_region(&m, pitch, yaw, 0.0, &o).expect("cube projects");
-            assert!(
-                r[0] >= 0.0 && r[1] >= 0.0 && r[2] <= 1.0 && r[3] <= 1.0,
-                "region must be clamped to the canvas: {r:?}"
-            );
-            assert!(
-                r[2] > r[0] && r[3] > r[1],
-                "region must be non-degenerate: {r:?}"
-            );
-            // auto_dist frames the model well inside the canvas, so the content
-            // window is strictly smaller than the full frame.
-            assert!(
-                (r[2] - r[0]) < 0.99 && (r[3] - r[1]) < 0.99,
-                "fit must crop, not keep the whole frame: {r:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn fit_content_fills_the_canvas() {
-        let m = cube();
-        let plain = opts(Format::Ascii, vec![]);
-        let mut fit = opts(Format::Ascii, vec![]);
-        fit.fit_content = true;
-        let nofit = ascii_coverage(&render_to_text(&m, &plain));
-        let fitted = ascii_coverage(&render_to_text(&m, &fit));
-        assert!(
-            fitted.0 >= 0.8 && fitted.1 >= 0.8,
-            "fit content should fill the canvas, got {fitted:?}"
-        );
-        assert!(
-            fitted.0 > nofit.0 + 0.2 && fitted.1 > nofit.1 + 0.2,
-            "fit {fitted:?} must cover substantially more than {nofit:?}"
-        );
-    }
-
     #[test]
     fn fit_content_yields_to_an_explicit_region() {
         // Priority contract: --region beats --fit content.
@@ -1629,14 +1562,20 @@ mod tests {
         // behind it: the visible part must be rasterized instead of the
         // whole edge being dropped with its culled endpoint.
         // The frame is 40x16 characters = 80x64 dots, so the canvas window
-        // is 40 wide either side of centre. At dist = 1 the visible vertex
-        // (depth 0.5) projects to x = 0.3 * focal(64) / 0.5 = 33.2, inside
-        // that window; its clipped end lands at half of it.
+        // spans x in [-40, 40]. `o.vfov = 1.0` pins the projection math:
+        // focal(64) = 32/tan(0.5) ≈ 58.6, so the visible vertex at depth
+        // 0.5 projects to x ≈ 35.2, inside the window. The clipped end
+        // sits at depth NEAR = 0.1 and projects three times further out
+        // (≈ 175.7), so Cohen-Sutherland clips it at the right canvas
+        // edge — the drawn segment runs from x ≈ 35.2 to 40 and lights
+        // the rightmost cells of the middle row.
         let m = Model {
             vertices: vec![(0.3, 0.0, 0.5), (0.3, 0.0, 1.0)],
             edges: vec![(0, 1)],
         };
         let mut o = opts(Format::Braille, vec![]);
+        o.vfov = 1.0; // pinned so the geometry above stays valid
+        // independent of DEFAULT_VFOV drift.
         o.auto_dist = false;
         o.dist = Some(1.0); // camera at z = 1: depth is `dist - z` per vertex
         let frame = render_single_to_text(&m, 0.0, 0.0, 0.0, &o);

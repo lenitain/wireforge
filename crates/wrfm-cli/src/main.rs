@@ -25,6 +25,7 @@ macro_rules! err {
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
+use std::io::Read;
 use wrfm_raster::geometry::{DEFAULT_VFOV, MAX_VFOV};
 
 /// The complete `.wrfm` v2 format spec, as printed by `wrfm format`.
@@ -42,15 +43,6 @@ COMMENT  # to end of line    ignored (except before the magic line)
 COORDS   write the shortest decimal that round-trips (0.5, 1.4142135623730951)
 AXIS     Y-UP: +Y is vertical (height); X and Z form the ground plane.
          A model built with Z as height appears lying on its side.
-
-VERSIONS v2 (this spec)  magic + enforced counts header + groups + checked
-                         edge indices; shortest round-trip f64 coordinates.
-         v1 (wrfm 0.4.0) no magic, no counts header, no groups, unchecked
-                         indices; v1 files are REJECTED. Migrate by
-                         prepending the magic line and a counts header with
-                         the file's ACTUAL v/e totals:
-                           wrfm 2
-                           vertices <N>   edges <M>
 
 GROUP EXAMPLE — groups are SECTIONS of the ONE global vertex list. The v
 lines under a group RE-LIST the global vertices that belong to it (in
@@ -109,7 +101,7 @@ OUTPUT ENCODING
   and `view` always print JSON. `render --format` instead selects the
   render style (braille|ascii|grid|both), never a data encoding.
 
-Authoritative spec: the `wrfm` crate docs (crates/wrfm/README.md; docs.rs/wrfm).
+Authoritative spec: docs/wrfm-spec.md in the repository (https://github.com/lenitain/wireforge/blob/main/crates/wrfm/docs/wrfm-spec.md). The `wrfm` crate README at crates/wrfm/README.md covers the library API only. Where this summary and the normative spec disagree, the spec wins.
 "#;
 
 #[derive(Parser, Debug)]
@@ -402,6 +394,17 @@ enum Command {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// Re-emit a .wrfm file in canonical v2 surface form: single magic + counts header, shortest round-trip coordinates, LF line endings, BOM stripped, single blank separators between sections. Surfaces that the parser accepts but the formatter normalizes: leading UTF-8 BOM, CRLF, excess blank lines, decorative `#` comments, and decimals like `1.0`. Today `#` comments are dropped silently (preservation is a planned addition; until then `--strip-comments` is implicit). `wrfm fmt` only re-emits the SURFACE — geometry is untouched. Use `wrfm transform` (rigid) or `wrfm edit` (topology) to change geometry.
+    Fmt {
+        /// Path to the .wrfm file, or '-' to read the model from stdin.
+        file: String,
+        /// Exit non-zero if re-canonicalization would change bytes; print the canonical form to stdout so `diff <(file) <(wrfm fmt file --check)` shows the exact change.
+        #[arg(short, long)]
+        check: bool,
+        /// Suppress all stdout output (the verdict still travels on the exit code; mirrors `cargo fmt -q`).
+        #[arg(short, long)]
+        quiet: bool,
+    },
     /// Print the complete .wrfm v2 format spec (magic, header, groups, precision, streams) to stdout. Learn the format from the CLI itself — no separate manual to keep in sync.
     Format,
     /// Convert an OBJ model to .wrfm (the only supported direction: obj -> wrfm).
@@ -599,6 +602,7 @@ fn main() {
             merge.as_deref(),
         ),
         Command::Diff { a, b, format } => cmd_diff(&a, &b, &format),
+        Command::Fmt { file, check, quiet } => cmd_fmt(&file, check, quiet),
         Command::Format => cmd_format(),
         Command::Convert { file } => cmd_convert(&file),
     };
@@ -1653,6 +1657,127 @@ fn cmd_diff(a: &str, b: &str, format: &str) -> i32 {
     out!("{}", render::diff_to_text(&ma, &mb, &opts, false));
     output::flush();
     0
+}
+
+/// `wrfm fmt` — read a `.wrfm` file and re-emit it in canonical v2 surface form
+/// (single magic + counts header, shortest round-trip coordinates, LF, BOM stripped,
+/// single blank separators). Surfaces the parser accepts but the formatter
+/// normalizes: leading UTF-8 BOM, CRLF, excess blank lines, decorative `#`
+/// comments, and decimals like `1.0`. `#` comments are dropped silently in this
+/// version — preservation is a planned addition.
+///
+/// Exit codes:
+/// * 0 — file is already canonical (or canonical text was produced from a
+///   model whose L2 verdict is `ok`).
+/// * 1 — `--check` mismatch (text would change), OR the model's L2 verdict
+///   is `warn` (the canonical-form verdict is the same tier as a `wrfm
+///   check` warning, mirroring the CLI's 4-tier scale; `--check` mismatch
+///   + `warn` still exits 1).
+/// * 2 — the model itself is `broken` (broken wins over `--check`'s warn,
+///   since broken is the higher-severity signal).
+/// * 3 — I/O, UTF-8 or parse failure.
+fn cmd_fmt(file: &str, check: bool, quiet: bool) -> i32 {
+    // Read raw bytes once. `-` consumes stdin, so the existing `load::load`
+    // cannot be reused (it would drain stdin a second time).
+    let raw_bytes: Vec<u8> = if file == "-" {
+        let mut buf = Vec::new();
+        if let Err(e) = std::io::stdin().read_to_end(&mut buf) {
+            err!("error: cannot read stdin: {e}\n");
+            return EXIT_NO_RESULT;
+        }
+        buf
+    } else {
+        match std::fs::read(file) {
+            Ok(b) => b,
+            Err(e) => {
+                err!("error: cannot read '{file}': {e}\n");
+                return EXIT_NO_RESULT;
+            }
+        }
+    };
+    // UTF-8 is required (the .wrfm format is text); reject early so `--check`
+    // doesn't lie about a non-canonical but undecodable file.
+    let text = match std::str::from_utf8(&raw_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            err!("error: '{file}' is not valid UTF-8\n");
+            return EXIT_NO_RESULT;
+        }
+    };
+    // Display name follows `load::load`'s convention: file stem or "stdin".
+    let name: String = if file == "-" {
+        "stdin".to_string()
+    } else {
+        std::path::Path::new(file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string()
+    };
+    let raw = match wrfm::WrfmModel::from_str(&name, text) {
+        Ok(m) => m,
+        Err(e) => {
+            err!("{e}\n");
+            return EXIT_NO_RESULT;
+        }
+    };
+    let model = wrfm_raster::Model {
+        vertices: raw.vertices.clone(),
+        edges: raw.edges.clone(),
+    };
+    let canonical = load::serialize_model(&model, &name, &raw.groups, raw.version);
+    let verdict = check::check_verdict(&model, false);
+
+    if check {
+        // `--check` compares the canonical emission against the input bytes
+        // after stripping BOM and normalizing CRLF→LF. A model that is
+        // already in canonical v2 surface form yields a clean 0; any
+        // difference (extra spaces, comments, trailing newlines, ...) is a
+        // warn-tier signal.
+        let normalized = normalize_surface(&raw_bytes);
+        if normalized == canonical.as_bytes() {
+            output::flush();
+            return exit_for(verdict);
+        }
+        // Mismatch. fmt has no unified-diff helper yet, so emit the canonical
+        // form so the user can pipe into `diff` to see the exact change.
+        // `-q` suppresses everything (matches `cargo fmt --check -q`).
+        if !quiet {
+            out!("{canonical}");
+        }
+        output::flush();
+        return if verdict == "broken" {
+            EXIT_BROKEN
+        } else {
+            EXIT_WARN
+        };
+    }
+
+    if !quiet {
+        out!("{canonical}");
+    }
+    output::flush();
+    exit_for(verdict)
+}
+
+/// Strip a leading UTF-8 BOM (`U+FEFF` = `EF BB BF`) and replace CRLF with LF,
+/// so `--check`'s byte compare treats BOM-/CRLF-wrapped input as already
+/// canonical. The result never grows; CRLF→LF shrinks it by one byte per
+/// matched pair, BOM strip shrinks it by three bytes.
+fn normalize_surface(raw: &[u8]) -> Vec<u8> {
+    let raw = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(raw);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if i + 1 < raw.len() && raw[i] == b'\r' && raw[i + 1] == b'\n' {
+            out.push(b'\n');
+            i += 2;
+        } else {
+            out.push(raw[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// `wrfm format` — print the complete `.wrfm` v2 spec to stdout. Pure informational command: no model input, no L2 check, exit 0 always.

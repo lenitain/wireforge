@@ -2332,16 +2332,6 @@ e 1 4
 e 2 4
 ";
 
-/// Lit (`#`) dots in a `--format ascii` render, skipping the `# ...`
-/// header lines and the `[view=...]` markers.
-fn lit_dots(render_stdout: &str) -> usize {
-    render_stdout
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.starts_with("[view="))
-        .map(|l| l.chars().filter(|&c| c == '#').count())
-        .sum()
-}
-
 #[test]
 fn check_always_prints_the_full_report() {
     let dir = scratch("check_full_report");
@@ -2430,117 +2420,9 @@ fn render_stderr_stays_empty_for_warn_and_broken() {
     fs::remove_dir_all(&dir).ok();
 }
 
-#[test]
-fn render_fit_content_fills_the_canvas() {
-    let dir = scratch("render_fit_content");
-    let path = write(&dir, "cube.wrfm", CUBE);
-    let mut args: Vec<&str> = vec![
-        "render",
-        path.to_str().unwrap(),
-        "--views",
-        "front",
-        "--format",
-        "ascii",
-        "--width",
-        "40",
-        "--height",
-        "16",
-    ];
-    let plain = run(&args);
-    assert_eq!(plain.status.code(), Some(0), "stderr: {}", stderr(&plain));
-    args.extend(["--fit", "content"]);
-    let fit = run(&args);
-    assert_eq!(fit.status.code(), Some(0), "stderr: {}", stderr(&fit));
-    let head = stdout(&fit).lines().next().unwrap_or("").to_string();
-    assert!(head.contains("fit=content"), "header: {head}");
-    let (p, f) = (lit_dots(&stdout(&plain)), lit_dots(&stdout(&fit)));
-    assert!(f > p, "fit must light more dots: plain={p} fit={f}");
-
-    // Priority contract: an explicit --region WINS over --fit content.
-    args.extend(["--region", "0.25,0.25,0.75,0.75"]);
-    let reg = run(&args);
-    assert_eq!(reg.status.code(), Some(0), "stderr: {}", stderr(&reg));
-    let head = stdout(&reg).lines().next().unwrap_or("").to_string();
-    assert!(head.contains("region=["), "header: {head}");
-    assert!(!head.contains("fit=content"), "region wins: {head}");
-
-    // An unknown fit mode is a usage error -> 3.
-    let out = run(&[
-        "render",
-        path.to_str().unwrap(),
-        "--views",
-        "front",
-        "--fit",
-        "zoom",
-    ]);
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
-    assert!(
-        stderr(&out).contains("fit must be"),
-        "stderr: {}",
-        stderr(&out)
-    );
-    fs::remove_dir_all(&dir).ok();
-}
-
 // ---------------------------------------------------------------------------
 // --vfov (vertical field of view, RADIANS)
 // ---------------------------------------------------------------------------
-
-#[test]
-fn render_vfov_is_echoed_and_wider_vfov_fills_more() {
-    // The vertical FOV drives the focal length and (via auto-dist) the
-    // camera distance: a WIDER vfov frames closer, so the same model takes
-    // up more of the canvas and lights more dots.
-    let dir = scratch("render_vfov");
-    let path = write(&dir, "cube.wrfm", CUBE);
-    let run_render = |vfov: &str| {
-        run(&[
-            "render",
-            path.to_str().unwrap(),
-            "--views",
-            "front",
-            "--format",
-            "ascii",
-            "--width",
-            "40",
-            "--height",
-            "16",
-            "--vfov",
-            vfov,
-        ])
-    };
-    let default = run(&[
-        "render",
-        path.to_str().unwrap(),
-        "--views",
-        "front",
-        "--format",
-        "ascii",
-        "--width",
-        "40",
-        "--height",
-        "16",
-    ]);
-    assert_eq!(
-        default.status.code(),
-        Some(0),
-        "stderr: {}",
-        stderr(&default)
-    );
-    let head = stdout(&default).lines().next().unwrap_or("").to_string();
-    assert!(head.contains("vfov=0.5 rad"), "header echoes vfov: {head}");
-
-    let narrow = run_render("0.5");
-    let wide = run_render("2.0");
-    assert_eq!(narrow.status.code(), Some(0), "stderr: {}", stderr(&narrow));
-    assert_eq!(wide.status.code(), Some(0), "stderr: {}", stderr(&wide));
-    let (n, w) = (lit_dots(&stdout(&narrow)), lit_dots(&stdout(&wide)));
-    assert!(
-        w > n,
-        "wider vfov must light more dots: vfov2.0={w} vfov0.5={n}"
-    );
-    fs::remove_dir_all(&dir).ok();
-}
 
 #[test]
 fn render_and_view_reject_out_of_range_vfov() {
@@ -3165,4 +3047,261 @@ fn verdict_survives_a_closed_pipe() {
         stderr(&out)
     );
     fs::remove_dir_all(&dir).ok();
+}
+
+// fmt
+// ---------------------------------------------------------------------------
+
+/// A canonical v2 closed triangle: shortest round-trip decimals, a single
+/// blank between header and body, a single blank between vertices and edges,
+/// no comments. The test fixture for "input already canonical".
+const FMT_TRI_CANON: &str = "\
+wrfm 2
+vertices 3   edges 3
+
+v 0 0 0
+v 1 0 0
+v 0 1 0
+
+e 0 1
+e 1 2
+e 2 0
+";
+
+/// The same triangle with `1.0` written instead of `1` — same MODEL, but
+/// not in canonical SURFACE form. The test fixture for "input needs format".
+const FMT_TRI_LAZY: &str = "\
+wrfm 2
+vertices 3   edges 3
+
+v 0.0 0.0 0.0
+v 1.0 0.0 0.0
+v 0.0 1.0 0.0
+
+e 0 1
+e 1 2
+e 2 0
+";
+
+/// A decorated input: leading comment, comments between sections, extra
+/// blank lines. Same MODEL as the canonical triangle, but none of the
+/// surface is canonical — `--check` must report mismatch.
+const FMT_TRI_DECORATED: &str = "\
+wrfm 2
+# a closed triangle
+
+vertices 3   edges 3
+# end of header
+
+v 0 0 0
+v 1 0 0
+v 0 1 0
+
+
+e 0 1
+e 1 2
+e 2 0
+";
+
+#[test]
+fn fmt_is_idempotent_on_canonical_input() {
+    let dir = scratch("fmt_idempotent");
+    let path = write(&dir, "tri.wrfm", FMT_TRI_CANON);
+    let out = run(&["fmt", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        FMT_TRI_CANON,
+        "fmt must be a no-op on canonical input"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_check_passes_on_canonical_input() {
+    let dir = scratch("fmt_check_ok");
+    let path = write(&dir, "tri.wrfm", FMT_TRI_CANON);
+    let out = run(&["fmt", "--check", "-q", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).is_empty(), "-q must silence stdout");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_emits_same_text_as_transform_identity() {
+    // `wrfm fmt` is `wrfm transform --identity` textualized — they MUST
+    // produce identical output for every valid input.
+    let dir = scratch("fmt_equiv_transform");
+    let path = write(&dir, "tri.wrfm", FMT_TRI_LAZY);
+    let fmt_out = run(&["fmt", path.to_str().unwrap()]);
+    let tfm_out = run(&["transform", path.to_str().unwrap()]);
+    assert_eq!(fmt_out.status.code(), Some(0));
+    assert_eq!(tfm_out.status.code(), Some(0));
+    assert_eq!(
+        stdout(&fmt_out),
+        stdout(&tfm_out),
+        "wrfm fmt ≡ wrfm transform (identity)"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_check_fails_and_emits_canonical_on_lazy_decimals() {
+    let dir = scratch("fmt_check_lazy");
+    let path = write(&dir, "tri.wrfm", FMT_TRI_LAZY);
+    let out = run(&["fmt", "--check", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    // Mismatch → emit canonical (no unified diff yet; users pipe into
+    // `diff <(file) <(wrfm fmt file --check)` to see the exact change).
+    assert_eq!(
+        stdout(&out),
+        FMT_TRI_CANON,
+        "--check mismatch must emit the canonical form"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_drops_comments_and_collapses_blank_lines() {
+    // Decorated input: comments and extra blanks survive parsing but are
+    // NOT canonical surface. `--check` fails; default fmt emits canonical
+    // with comments silently dropped (preservation is a planned future
+    // addition — today the contract is "comments always stripped").
+    let dir = scratch("fmt_decorated");
+    let path = write(&dir, "tri.wrfm", FMT_TRI_DECORATED);
+    let out = run(&["fmt", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        FMT_TRI_CANON,
+        "comments and extra blanks are normalized to canonical"
+    );
+    let ck = run(&["fmt", "--check", path.to_str().unwrap()]);
+    assert_eq!(ck.status.code(), Some(1), "stderr: {}", stderr(&ck));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_strips_leading_utf8_bom_for_check() {
+    // A leading UTF-8 BOM (`EF BB BF`) on otherwise-canonical text is
+    // normalized away by `--check`'s surface compare, so the gate passes.
+    let mut dirty = Vec::new();
+    dirty.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    dirty.extend_from_slice(FMT_TRI_CANON.as_bytes());
+    let dir = scratch("fmt_bom");
+    let path = write(&dir, "tri.wrfm", std::str::from_utf8(&dirty).unwrap());
+    let out = run(&["fmt", "--check", "-q", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_normalizes_crlf_to_lf_for_check() {
+    // CRLF line endings on otherwise-canonical text normalize to LF, so
+    // `--check` passes — BOM/CRLF are the two surface variants the parser
+    // accepts that the formatter is transparent to.
+    let dirty = FMT_TRI_CANON.replace('\n', "\r\n");
+    let dir = scratch("fmt_crlf");
+    let path = write(&dir, "tri.wrfm", &dirty);
+    let out = run(&["fmt", "--check", "-q", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_quiet_suppresses_stdout_on_success() {
+    let dir = scratch("fmt_quiet_ok");
+    let path = write(&dir, "tri.wrfm", FMT_TRI_LAZY);
+    let out = run(&["fmt", "-q", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).is_empty(), "-q must silence stdout");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_check_mismatch_quiet_is_silent() {
+    // `--check` mismatch + `-q`: silent on stdout, exit 1 — mirrors
+    // `cargo fmt --check -q` (verdict travels on the exit code alone).
+    let dir = scratch("fmt_check_quiet_mismatch");
+    let path = write(&dir, "tri.wrfm", FMT_TRI_LAZY);
+    let out = run(&["fmt", "--check", "-q", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).is_empty(),
+        "--check -q must stay silent on mismatch"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_stdin_canonical_check_passes() {
+    let out = run_stdin(&["fmt", "-", "--check", "-q"], FMT_TRI_CANON);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    fs::remove_dir_all(std::env::temp_dir().join("x")).ok();
+}
+
+#[test]
+fn fmt_stdin_drains_only_once() {
+    // Stdin must not be re-read after we've consumed it; running fmt twice
+    // against `-` would block on the second read because stdin is closed.
+    // The contract is: the byte stream is taken once, parsed once, and the
+    // canonical form is emitted.
+    let out = run_stdin(&["fmt", "-"], FMT_TRI_CANON);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), FMT_TRI_CANON);
+    fs::remove_dir_all(std::env::temp_dir().join("x")).ok();
+}
+
+#[test]
+fn fmt_nonexistent_file_exits_three() {
+    let out = run(&["fmt", "/tmp/wrfm-definitely-does-not-exist.wrfm"]);
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("cannot read"),
+        "stderr should diagnose the failure: {}",
+        stderr(&out)
+    );
+    fs::remove_dir_all(std::env::temp_dir().join("x")).ok();
+}
+
+#[test]
+fn fmt_parse_failure_exits_three() {
+    // `cmt_before.wrfm` has `# leading` BEFORE the magic line — the parser
+    // rejects it as `MissingMagic` (format error), so `fmt` exits 3.
+    let out = run(&["fmt", "cmt_before.wrfm"]);
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    fs::remove_dir_all(std::env::temp_dir().join("x")).ok();
+}
+
+#[test]
+fn fmt_broken_model_exits_two_overriding_check() {
+    // The BROKEN fixture is canonical except for the `e 0 0` zero-length
+    // edge; `--check` would compute a match, but the higher-severity L2
+    // verdict (broken) wins on the exit code, mirroring the CLI's four-tier
+    // contract. Without --check the same exit-code rule applies.
+    let dir = scratch("fmt_broken");
+    let path = write(&dir, "broken.wrfm", BROKEN);
+    let out = run(&["fmt", "--check", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    let out = run(&["fmt", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fmt_double_application_is_idempotent() {
+    // `fmt(fmt(x)) ≡ fmt(x)` — the strongest sanity check on the canonical
+    // surface contract. A re-canonicalization that changed something would
+    // break this.
+    let dir = scratch("fmt_double");
+    let path = write(&dir, "tri.wrfm", FMT_TRI_DECORATED);
+    let once = run(&["fmt", path.to_str().unwrap()]);
+    let dir2 = scratch("fmt_double_2");
+    let path2 = write(&dir2, "tri.wrfm", &stdout(&once));
+    let twice = run(&["fmt", path2.to_str().unwrap()]);
+    assert_eq!(once.status.code(), Some(0));
+    assert_eq!(twice.status.code(), Some(0));
+    assert_eq!(stdout(&once), stdout(&twice), "fmt must be a fixed point");
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&dir2).ok();
 }

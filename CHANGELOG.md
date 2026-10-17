@@ -15,11 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Vertical FOV is a renderer parameter, defaulting to 1.0 rad. **Breaking** for
   anyone reading the renderer internals.
 - Example asset `utah-teapot.wrfm`.
+- `wrfm fmt <FILE>` re-emits a `.wrfm` file in canonical v2 surface form
+  (shortest round-trip coordinates, single blank separators, BOM stripped,
+  CRLF→LF). `--check` exits 1 if re-canonicalization would change bytes
+  (mirrors `cargo fmt --check`); `-q` silences stdout. Decorative `#`
+  comments are dropped in this version — preservation is a planned
+  addition.
+- `wrfm` parser rejects non-finite (`±inf`, `NaN`) vertex coordinates with the
+  new `NotFinite` error variant.
+- Fixture-driven parser tests in `crates/wrfm/tests/fixtures/` — 44 `.wrfm`
+  files plus a single manifest of expected outcomes; `.gitattributes` pins the
+  CRLF fixture as `binary` so `core.autocrlf=input` does not mangle it.
 
 ### Changed
 
 - `d`/`f` roll the model instead of rotating the camera. **Breaking.**
 - `Viewport` folds the former `grid` and `window` into one. **Breaking.**
+- The authoritative `.wrfm` v2 format spec lives at
+  `crates/wrfm/docs/wrfm-spec.md`. The root `SPEC.md`, `crates/wrfm/README.md`,
+  and the CLI's inline `FORMAT_SPEC` are pointers now. **Breaking** for any
+  downstream doc that scraped the old locations.
 
 ### Fixed
 
@@ -47,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Refactor
 
 - Drop `#[allow(dead_code)]` from test-only render accessors.
+- Viewer render tests pin `vfov = 1.0`, decoupling the projection-coord
+  assertions from `DEFAULT_VFOV` drift.
+- Duplicated fit-content and vfov tests removed from
+  `crates/wrfm-cli/src/render.rs` and `crates/wrfm-cli/tests/cli.rs`; the
+  remaining `cli.rs` tests cover the same behaviour.
 
 ## [0.8.0] - 2026-10-09
 

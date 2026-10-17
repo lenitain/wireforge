@@ -15,8 +15,11 @@ pub const DEFAULT_VFOV: f64 = 0.5;
 /// reject values outside `(0, MAX_VFOV]` as usage errors.
 pub const MAX_VFOV: f64 = 3.0;
 
-/// Auto-fit headroom: the model fills 1/FIT_MARGIN of the screen height.
-pub const FIT_MARGIN: f64 = 2.0;
+/// Auto-fit headroom: at the fit distance, the model's geometric-mean extent
+/// projects to `1 / (2 * FIT_MARGIN)` of canvas height (half on each side of
+/// the centre); the remaining canvas is split evenly as top/bottom margin.
+/// `0.7` puts the model at ≈71% of canvas height (≈14% margin each side).
+pub const FIT_MARGIN: f64 = 0.7;
 
 /// The extent reported for a model with no geometry. An empty model has
 /// `(inf, -inf)` bounds, whose dimensions are `-inf` and whose extent is
@@ -133,9 +136,9 @@ pub fn extent_from_bounds(b: ([f64; 3], [f64; 3])) -> f64 {
     (dx * dy * dz).cbrt().max(MIN_EXTENT)
 }
 
-/// Auto camera distance (the fork's `fit_to` math): the geometric-mean
-/// extent fills 1/FIT_MARGIN of the screen half-height at vertical FOV
-/// `vfov` (radians).
+/// Auto camera distance: at this distance, the model's geometric-mean
+/// extent projects to `1 / FIT_MARGIN` of canvas height at vertical FOV
+/// `vfov` (radians). See [`FIT_MARGIN`].
 pub fn auto_dist(m: &Model, vfov: f64) -> f64 {
     auto_dist_from_extent(model_extent(m), vfov)
 }

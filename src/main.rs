@@ -38,13 +38,14 @@ mod view;
 use timer::{TimerId, TimerScheduler};
 use view::ViewState;
 
-// Speed constants are dyadic fractions (exact in binary) with ~1.3x
-// translation / ~1.1x rotation speedup over the upstream values.
+// Speed constants are dyadic fractions (exact in binary): rotation and
+// auto-spin rates are pure radians per second (parameter-free by design).
+// Translation speed is set per session from the initial camera distance
+// (`App::speed = dist_initial / 5.0`), so this unit owns only `ROT_RATE`
+// / `SPIN_RATE` — every translation step is just `speed * dt`.
 
 /// Smooth continuous rotation rate (radians per second) while a key is held.
 const ROT_RATE: f64 = 169.0 / 128.0;
-/// Smooth continuous translation rate: fraction of the model extent moved per second.
-const MOVE_RATE: f64 = 83.0 / 128.0;
 
 /// Auto-spin yaw rate (radians per second): 169/256 = 0.66015625, a dyadic (exact-in-binary) constant.
 const SPIN_RATE: f64 = 169.0 / 256.0;
@@ -521,8 +522,8 @@ const fn keymap() -> [KeymapEntry; chord_count()] {
 const KEYMAP: [KeymapEntry; chord_count()] = keymap();
 
 /// One frame of smooth continuous motion for a held key (model follows key).
-fn continuous_step(view: &mut ViewState, m: Motion, scale: f64, dt: f64) {
-    apply_motion_step(view, m, ROT_RATE * dt, scale * MOVE_RATE * dt);
+fn continuous_step(view: &mut ViewState, m: Motion, speed: f64, dt: f64) {
+    apply_motion_step(view, m, ROT_RATE * dt, speed * dt);
 }
 
 /// Apply one motion step: rotation around the world axes (or, local-frame,
@@ -1263,11 +1264,15 @@ struct App {
     /// The model's geometric-mean length ([`view::model_extent`]), computed
     /// once because `current` is never mutated after `App::new`.
     ///
-    /// It sizes the axes and the pan/zoom step, so re-deriving it per frame
-    /// would put an O(n) bounds scan on every frame — and it is needed twice
-    /// per frame (axes + held motion). The bounding box only depends on the
+    /// It sizes the axes, so re-deriving it per frame would put an O(n)
+    /// bounds scan on every frame. The bounding box only depends on the
     /// model, never on the view, so one scan at load is enough.
     extent: f64,
+    /// Translation speed in world units per second, set once at construction
+    /// from the initial camera distance: the model's coordinate centre
+    /// reaches the camera in 5 s at the initial pose, and the rate is pinned
+    /// for the session (zoom in/out keeps this speed, by design).
+    speed: f64,
     name: String,
     /// Statusline label override: the FIFO path for a stream preview, whose
     /// model name is only the file stem; `None` shows the model name.
@@ -1306,9 +1311,14 @@ impl App {
         // fresh App is always correctly framed — including the blank start-up
         // view, whose extent is undefined.
         view.fit_to_extent(extent);
+        // Translation speed: 5 s for the model centre to reach the camera
+        // from the initial pose. Pinned at start-up so the parameter set
+        // driving motion is purely session-initial.
+        let speed = view.dist / 5.0;
         App {
             current,
             extent,
+            speed,
             name,
             strip_label,
             view,
@@ -1345,9 +1355,10 @@ impl App {
         self.held_modifiers() != before
     }
 
-    /// Translation speed scales with the model's geometric-mean extent.
-    fn move_scale(&self) -> f64 {
-        self.extent
+    /// Translation speed in world units per second (see [`App::speed`]): the
+    /// model's coordinate centre reaches the camera in 5 s, fixed at start-up.
+    fn translation_speed(&self) -> f64 {
+        self.speed
     }
 
     /// Record that the keyboard said something at `now`.
@@ -1503,9 +1514,9 @@ impl App {
         if self.held.is_empty() {
             return;
         }
-        let move_scale = self.move_scale();
+        let speed = self.translation_speed();
         for hold in self.held.values() {
-            continuous_step(&mut self.view, hold.motion, move_scale, dt);
+            continuous_step(&mut self.view, hold.motion, speed, dt);
         }
     }
 }
@@ -2092,7 +2103,6 @@ mod tests {
     #[test]
     fn speed_constants_are_dyadic_and_exact() {
         assert_eq!(ROT_RATE * 128.0, 169.0);
-        assert_eq!(MOVE_RATE * 128.0, 83.0);
         assert_eq!(SPIN_RATE * 256.0, 169.0);
     }
 
@@ -3154,8 +3164,10 @@ mod tests {
     }
 
     /// The model is immutable once loaded, so its extent is measured once and
-    /// reused: the axes, the auto-fit distance and the pan/zoom step must all
-    /// read that cached value instead of re-scanning every vertex per frame.
+    /// reused: the axes and the auto-fit distance must all read that cached
+    /// value instead of re-scanning every vertex per frame. The translation
+    /// speed is also cached at construction, derived from the initial
+    /// camera distance (`dist_initial / 5.0`).
     #[test]
     fn app_caches_the_model_extent_for_every_frame_use() {
         // A +-1 cube: the geometric mean of (2,2,2) is 2.
@@ -3179,8 +3191,9 @@ mod tests {
             "App::new must frame from the cached extent"
         );
 
-        // The pan/zoom step is the cached extent, not a per-frame scan.
-        assert_eq!(app.move_scale(), app.extent);
+        // Translation speed: 5 s for the model centre to reach the camera
+        // from the initial pose, pinned for the session.
+        assert_eq!(app.translation_speed(), app.view.dist / 5.0);
 
         // Key `r` re-fits from the cache too, rather than a fresh bounds scan.
         app.view.dist = 1234.0;

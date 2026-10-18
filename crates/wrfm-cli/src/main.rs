@@ -25,7 +25,9 @@ macro_rules! err {
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
+use std::borrow::Cow;
 use std::io::Read;
+use wrfm_raster::Model;
 use wrfm_raster::geometry::{DEFAULT_VFOV, MAX_VFOV};
 
 /// The complete `.wrfm` v2 format spec, as printed by `wrfm format`.
@@ -877,15 +879,15 @@ fn cmd_check(file: &str, group: Option<&str>, strict: bool, format: &str) -> i32
         Ok(l) => l,
         Err(code) => return code,
     };
-    let model = match group {
+    let model: Cow<'_, Model> = match group {
         Some(want) => {
             let g = match resolve_group(&loaded.groups, want, &loaded.source) {
                 Ok(g) => g,
                 Err(code) => return code,
             };
-            render::submodel_for_group(&loaded.model, g)
+            Cow::Owned(render::submodel_for_group(&loaded.model, g))
         }
-        None => loaded.model.clone(),
+        None => Cow::Borrowed(&loaded.model),
     };
     // `strict` is applied HERE so the verdict (and therefore the exit code)
     // already carries the upgrade: warn → broken.
@@ -1001,15 +1003,15 @@ fn cmd_verify(
         expect_redundant,
         tolerance,
     };
-    let model = match group {
+    let model: Cow<'_, Model> = match group {
         Some(want) => {
             let g = match resolve_group(&loaded.groups, want, &loaded.source) {
                 Ok(g) => g,
                 Err(code) => return code,
             };
-            render::submodel_for_group(&loaded.model, g)
+            Cow::Owned(render::submodel_for_group(&loaded.model, g))
         }
-        None => loaded.model.clone(),
+        None => Cow::Borrowed(&loaded.model),
     };
     let report = verify::verify(&model, &loaded.groups, &opts);
     let verdict = report["verdict"].as_str().unwrap_or("fail");
@@ -1030,15 +1032,15 @@ fn cmd_info(file: &str, group: Option<&str>) -> i32 {
         Ok(l) => l,
         Err(code) => return code,
     };
-    let model = match group {
+    let model: Cow<'_, Model> = match group {
         Some(want) => {
             let g = match resolve_group(&loaded.groups, want, &loaded.source) {
                 Ok(g) => g,
                 Err(code) => return code,
             };
-            render::submodel_for_group(&loaded.model, g)
+            Cow::Owned(render::submodel_for_group(&loaded.model, g))
         }
-        None => loaded.model.clone(),
+        None => Cow::Borrowed(&loaded.model),
     };
     let verdict = check::check_verdict(&model, false);
     let (min, max) = wrfm_raster::geometry::bounds(&model);
@@ -1114,15 +1116,15 @@ fn cmd_geometry(file: &str, full: bool, group: Option<&str>) -> i32 {
         Ok(l) => l,
         Err(code) => return code,
     };
-    let model = match group {
+    let model: Cow<'_, Model> = match group {
         Some(want) => {
             let g = match resolve_group(&loaded.groups, want, &loaded.source) {
                 Ok(g) => g,
                 Err(code) => return code,
             };
-            render::submodel_for_group(&loaded.model, g)
+            Cow::Owned(render::submodel_for_group(&loaded.model, g))
         }
-        None => loaded.model.clone(),
+        None => Cow::Borrowed(&loaded.model),
     };
     let verdict = check::check_verdict(&model, false);
     let g = if full {
@@ -1157,7 +1159,7 @@ fn cmd_query(
     };
     let n = loaded.model.vertices.len();
     let mut args = query::QueryArgs { at, range: None };
-    let model = match q {
+    let model: Cow<'_, Model> = match q {
         // vertices: `--range` XOR `--group` (never both). `--group` selects
         // the group's OWN vertices `[start, end)` with their GLOBAL indices
         // (unlike the submodel-scoped text queries).
@@ -1179,7 +1181,7 @@ fn cmd_query(
                     Err(code) => return code,
                 });
             }
-            loaded.model.clone()
+            Cow::Borrowed(&loaded.model)
         }
         // distance / connectivity: whole model, global --range "a,b".
         query::Query::Distance | query::Query::Connectivity => {
@@ -1195,7 +1197,7 @@ fn cmd_query(
                 Ok(r) => r,
                 Err(code) => return code,
             });
-            loaded.model.clone()
+            Cow::Borrowed(&loaded.model)
         }
         _ => match group {
             Some(want) => {
@@ -1203,9 +1205,9 @@ fn cmd_query(
                     Ok(g) => g,
                     Err(code) => return code,
                 };
-                render::submodel_for_group(&loaded.model, g)
+                Cow::Owned(render::submodel_for_group(&loaded.model, g))
             }
-            None => loaded.model.clone(),
+            None => Cow::Borrowed(&loaded.model),
         },
     };
     if json {
@@ -1239,15 +1241,15 @@ fn cmd_view(
         Err(code) => return code,
     };
     let verdict = check::check_verdict(&loaded.model, false);
-    let model = match group {
+    let model: Cow<'_, Model> = match group {
         Some(want) => {
             let g = match resolve_group(&loaded.groups, want, &loaded.source) {
                 Ok(g) => g,
                 Err(code) => return code,
             };
-            render::submodel_for_group(&loaded.model, g)
+            Cow::Owned(render::submodel_for_group(&loaded.model, g))
         }
-        None => loaded.model.clone(),
+        None => Cow::Borrowed(&loaded.model),
     };
     let dist = if auto_dist {
         wrfm_raster::geometry::auto_dist(&model, vfov)
@@ -1302,18 +1304,18 @@ fn cmd_render(
         Ok(o) => o,
         Err(code) => return code,
     };
-    let (model, group_tag) = match group {
+    let (model, group_tag): (Cow<'_, Model>, String) = match group {
         Some(want) => {
             let g = match resolve_group(&loaded.groups, want, &loaded.source) {
                 Ok(g) => g,
                 Err(code) => return code,
             };
             (
-                render::submodel_for_group(&loaded.model, g),
+                Cow::Owned(render::submodel_for_group(&loaded.model, g)),
                 format!("  group={want}"),
             )
         }
-        None => (loaded.model.clone(), String::new()),
+        None => (Cow::Borrowed(&loaded.model), String::new()),
     };
     let (min, max) = wrfm_raster::geometry::bounds(&model);
 
@@ -1466,12 +1468,21 @@ fn cmd_transform(
             },
         },
     };
-    let out_model = transform::apply(&loaded.model, &t);
+    // A transform maps vertices 1:1 and never touches edges: transform only
+    // the vertex buffer, MOVE the source edge list into the result (no clone),
+    // and drop the now-redundant source geometry before `check_verdict`'s
+    // peak — holding `loaded.model` and `out_model` at once was pure waste.
+    let out_vertices = transform::transform_vertices(&loaded.model, &t);
+    let Model {
+        vertices: _,
+        edges: out_edges,
+    } = loaded.model;
+    let out_model = Model {
+        vertices: out_vertices,
+        edges: out_edges,
+    };
     let verdict = check::check_verdict(&out_model, false);
-    out!(
-        "{}",
-        load::serialize_model(&out_model, &loaded.name, &loaded.groups, loaded.version)
-    );
+    output::stdout_stream(|w| load::write_model(w, &out_model, &loaded.groups, loaded.version));
     output::flush();
     exit_for(verdict)
 }
@@ -1521,27 +1532,15 @@ fn cmd_edit(
         Err(code) => return code,
     };
 
-    let (out_model, new_groups, name) = if clean {
+    let (out_model, new_groups) = if clean {
         let (out, removed) = edit::clean(&loaded.model);
-        (
-            out,
-            edit::remap_groups(&loaded.groups, &removed),
-            loaded.name.clone(),
-        )
+        (out, edit::remap_groups(&loaded.groups, &removed))
     } else if dedupe {
         let (out, removed) = edit::dedupe(&loaded.model);
-        (
-            out,
-            edit::remap_groups(&loaded.groups, &removed),
-            loaded.name.clone(),
-        )
+        (out, edit::remap_groups(&loaded.groups, &removed))
     } else if let Some(tol) = weld {
         let (out, removed) = edit::weld(&loaded.model, tol);
-        (
-            out,
-            edit::remap_groups(&loaded.groups, &removed),
-            loaded.name.clone(),
-        )
+        (out, edit::remap_groups(&loaded.groups, &removed))
     } else if let Some(other) = merge {
         let other_loaded = match load(other) {
             Ok(l) => l,
@@ -1553,7 +1552,7 @@ fn cmd_edit(
             &other_loaded.groups,
             loaded.model.vertices.len(),
         );
-        (out, groups, loaded.name.clone())
+        (out, groups)
     } else {
         let del_v = match dv {
             None => Vec::new(),
@@ -1586,13 +1585,11 @@ fn cmd_edit(
             (
                 edit::delete_vertices(&loaded.model, &del_v),
                 edit::remap_groups(&loaded.groups, &del_v),
-                loaded.name.clone(),
             )
         } else if !del_e.is_empty() {
             (
                 edit::delete_edges(&loaded.model, &del_e),
                 loaded.groups.clone(),
-                loaded.name.clone(),
             )
         } else {
             let g = match resolve_group(&loaded.groups, eg.unwrap(), &loaded.source) {
@@ -1605,14 +1602,11 @@ fn cmd_edit(
                 vertex_start: 0,
                 vertex_end: out.vertices.len(),
             }];
-            (out, groups, loaded.name.clone())
+            (out, groups)
         }
     };
     let verdict = check::check_verdict(&out_model, false);
-    out!(
-        "{}",
-        load::serialize_model(&out_model, &name, &new_groups, loaded.version)
-    );
+    output::stdout_stream(|w| load::write_model(w, &out_model, &new_groups, loaded.version));
     output::flush();
     exit_for(verdict)
 }
@@ -1721,11 +1715,12 @@ fn cmd_fmt(file: &str, check: bool, quiet: bool) -> i32 {
             return EXIT_NO_RESULT;
         }
     };
+    // MOVE (never clone) the geometry into the `Model` the verdict reads;
+    // groups/version stay on `raw` and are borrowed for serialization.
     let model = wrfm_raster::Model {
-        vertices: raw.vertices.clone(),
-        edges: raw.edges.clone(),
+        vertices: raw.vertices,
+        edges: raw.edges,
     };
-    let canonical = load::serialize_model(&model, &name, &raw.groups, raw.version);
     let verdict = check::check_verdict(&model, false);
 
     if check {
@@ -1733,9 +1728,13 @@ fn cmd_fmt(file: &str, check: bool, quiet: bool) -> i32 {
         // after stripping BOM and normalizing CRLF→LF. A model that is
         // already in canonical v2 surface form yields a clean 0; any
         // difference (extra spaces, comments, trailing newlines, ...) is a
-        // warn-tier signal.
+        // warn-tier signal. The canonical form is buffered here (and only
+        // here) because the comparison needs the whole thing at once.
+        let mut canonical = Vec::new();
+        load::write_model(&mut canonical, &model, &raw.groups, raw.version)
+            .expect("serializing into a Vec<u8> cannot fail");
         let normalized = normalize_surface(&raw_bytes);
-        if normalized == canonical.as_bytes() {
+        if normalized == canonical {
             output::flush();
             return exit_for(verdict);
         }
@@ -1743,7 +1742,7 @@ fn cmd_fmt(file: &str, check: bool, quiet: bool) -> i32 {
         // form so the user can pipe into `diff` to see the exact change.
         // `-q` suppresses everything (matches `cargo fmt --check -q`).
         if !quiet {
-            out!("{canonical}");
+            output::stdout_stream(|w| w.write_all(&canonical));
         }
         output::flush();
         return if verdict == "broken" {
@@ -1754,7 +1753,7 @@ fn cmd_fmt(file: &str, check: bool, quiet: bool) -> i32 {
     }
 
     if !quiet {
-        out!("{canonical}");
+        output::stdout_stream(|w| load::write_model(w, &model, &raw.groups, raw.version));
     }
     output::flush();
     exit_for(verdict)
@@ -1799,10 +1798,7 @@ fn cmd_convert(file: &str) -> i32 {
         edges: model.edges,
     };
     let verdict = check::check_verdict(&rw, false);
-    out!(
-        "{}",
-        load::serialize_model(&rw, &model.name, &model.groups, model.version)
-    );
+    output::stdout_stream(|w| load::write_model(w, &rw, &model.groups, model.version));
     output::flush();
     exit_for(verdict)
 }

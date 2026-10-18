@@ -11,4 +11,6 @@ mod tests;
 #[cfg(feature = "std")]
 pub use error::LoadError;
 pub use error::{CountKind, EdgeError, ParseError, VertexError};
+#[cfg(feature = "std")]
+pub use model::write_canonical;
 pub use model::{Group, WrfmModel};

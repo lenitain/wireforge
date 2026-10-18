@@ -38,11 +38,10 @@ impl WrfmModel {
             version: 2,
             groups: Vec::new(),
         };
-        // Source location of each parsed edge, needed to report OutOfRange:
-        // line number, both index columns, and the byte span of the line inside
-        // `source` — the line text itself is sliced back out only on the error
-        // path, so the success path stores positions instead of a `String` copy.
-        let mut edge_meta: Vec<(usize, usize, usize, core::ops::Range<usize>)> = Vec::new();
+        // Edge source positions are recovered LAZILY (see `locate_edge`) only
+        // when reporting an out-of-range index, so the success path stores no
+        // per-edge metadata — the old eager table cost 40 bytes an edge and
+        // was the top allocator for large models.
 
         // One token buffer for the whole parse, reused by every line below.
         // A 1M-edge file is 2M lines, so a per-line `Vec` costs 2M malloc/free
@@ -169,7 +168,6 @@ impl WrfmModel {
                 reserve_for_declared_counts(
                     &mut model.vertices,
                     &mut model.edges,
-                    &mut edge_meta,
                     declared_vertices,
                     declared_edges,
                     source.len(),
@@ -259,11 +257,9 @@ impl WrfmModel {
                 }
                 "e" => {
                     let mut indices = [0usize; 2];
-                    let mut cols = [1usize; 2];
                     for (i, which) in [1u8, 2u8].iter().enumerate() {
                         match toks.get(i + 1) {
                             Some(&(tok, col)) => {
-                                cols[i] = col;
                                 // A negative literal (e.g. `-1`) is a
                                 // NegativeIndex, not a generic NotAnIndex.
                                 if let Some(rest) = tok.strip_prefix('-')
@@ -308,10 +304,6 @@ impl WrfmModel {
                         }
                     }
                     model.edges.push((indices[0], indices[1]));
-                    let line_start = raw_line.as_ptr() as usize - source.as_ptr() as usize;
-                    let line_span = line_start..line_start + raw_line.len();
-                    debug_assert_eq!(&source[line_span.clone()], raw_line, "span must round-trip");
-                    edge_meta.push((line, cols[0], cols[1], line_span));
                     if model.edges.len() > declared_edges {
                         return Err(ParseError::CountMismatch {
                             line,
@@ -374,15 +366,17 @@ impl WrfmModel {
         }
 
         // Validate edge indices against the final vertex count, so forward
-        // references to later-defined vertices are legal.
+        // references to later-defined vertices are legal. The offending edge's
+        // source position is recovered lazily (see `locate_edge`); the success
+        // path stores no per-edge metadata.
         let vertex_count = model.vertices.len();
         for (i, &(a, b)) in model.edges.iter().enumerate() {
-            let (edge_line, col_a, col_b, line_span) = &edge_meta[i];
             if a >= vertex_count {
+                let (line, col_a, _col_b, line_text) = locate_edge(source, i);
                 return Err(ParseError::InvalidEdge {
-                    line: *edge_line,
-                    column: *col_a,
-                    line_text: source[line_span.clone()].to_string(),
+                    line,
+                    column: col_a,
+                    line_text,
                     detail: EdgeError::OutOfRange {
                         index: a,
                         vertex_count,
@@ -391,10 +385,11 @@ impl WrfmModel {
                 });
             }
             if b >= vertex_count {
+                let (line, _col_a, col_b, line_text) = locate_edge(source, i);
                 return Err(ParseError::InvalidEdge {
-                    line: *edge_line,
-                    column: *col_b,
-                    line_text: source[line_span.clone()].to_string(),
+                    line,
+                    column: col_b,
+                    line_text,
                     detail: EdgeError::OutOfRange {
                         index: b,
                         vertex_count,
@@ -460,12 +455,10 @@ fn malformed_header_location(toks: &[(&str, usize)]) -> (usize, String) {
 /// checks at the end reject a file whose header and body disagree. Over-
 /// reserving is what the cap prevents.
 ///
-/// `edge_meta` grows in lockstep with `edges` (both are pushed together under
-/// the same `declared_edges` check), so the declared count bounds it exactly.
+/// `edges` grows one-per-`e`-line, so the declared count bounds it exactly.
 fn reserve_for_declared_counts(
     vertices: &mut Vec<(f64, f64, f64)>,
     edges: &mut Vec<(usize, usize)>,
-    edge_meta: &mut Vec<(usize, usize, usize, core::ops::Range<usize>)>,
     declared_vertices: usize,
     declared_edges: usize,
     source_len: usize,
@@ -477,7 +470,43 @@ fn reserve_for_declared_counts(
     let want_edges = declared_edges.min(ceiling);
     vertices.reserve(want_vertices.saturating_sub(vertices.len()));
     edges.reserve(want_edges.saturating_sub(edges.len()));
-    edge_meta.reserve(want_edges.saturating_sub(edge_meta.len()));
+}
+
+/// Recover the exact source position of the `target`-th edge (0-based) by
+/// re-scanning `source` on the error path.
+///
+/// This replaces the old eager `edge_meta` table (40 bytes an edge, always
+/// allocated) with work done only when an `OutOfRange` edge is actually found:
+/// the success path never pays for it. The scan mirrors the parse loop's
+/// `lines()`/`tokenize` so the reported `line`, `column` and `line_text` are
+/// byte-identical to what the eager table captured.
+///
+/// Returns `(line, col_a, col_b, line_text)`. The `target`-th `e` line is
+/// guaranteed to exist: it was parsed into `edges[target]` before validation.
+fn locate_edge(source: &str, target: usize) -> (usize, usize, usize, String) {
+    let mut scratch: Vec<(&str, usize)> = Vec::new();
+    let mut seen = 0usize;
+    for (idx, raw_line) in source.lines().enumerate() {
+        let line = idx + 1;
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        tokenize(raw_line, &mut scratch);
+        if scratch.is_empty() || scratch[0].0 != "e" {
+            continue;
+        }
+        if seen == target {
+            // Both index columns are the token columns of the two indices;
+            // `missing_value_column` is unreachable here (the edge parsed).
+            let col_a = scratch.get(1).map(|&(_, c)| c).unwrap_or(2);
+            let col_b = scratch.get(2).map(|&(_, c)| c).unwrap_or(2);
+            return (line, col_a, col_b, raw_line.to_string());
+        }
+        seen += 1;
+    }
+    // Unreachable: `target` indexes an edge that was parsed from this source.
+    (1, 1, 1, String::new())
 }
 
 /// Split a line into `(token, 1-based char column)` pairs, ignoring surrounding whitespace.
@@ -583,14 +612,7 @@ mod parser_unit_tests {
         // 400 bytes of text can hold at most 100 items, whatever the header says.
         let mut vertices = Vec::new();
         let mut edges = Vec::new();
-        reserve_for_declared_counts(
-            &mut vertices,
-            &mut edges,
-            &mut Vec::new(),
-            999_999_999,
-            999_999_999,
-            400,
-        );
+        reserve_for_declared_counts(&mut vertices, &mut edges, 999_999_999, 999_999_999, 400);
         assert!(
             vertices.capacity() <= 100,
             "vertices reserved {} for 400 bytes",
@@ -609,14 +631,7 @@ mod parser_unit_tests {
     fn reserved_capacity_uses_the_declared_counts() {
         let mut vertices = Vec::new();
         let mut edges = Vec::new();
-        reserve_for_declared_counts(
-            &mut vertices,
-            &mut edges,
-            &mut Vec::new(),
-            1_000,
-            2_000,
-            8_000_000,
-        );
+        reserve_for_declared_counts(&mut vertices, &mut edges, 1_000, 2_000, 8_000_000);
         // `reserve` may round up; the point is that growth from zero is gone.
         assert!(vertices.capacity() >= 1_000);
         assert!(edges.capacity() >= 2_000);
@@ -629,7 +644,7 @@ mod parser_unit_tests {
     fn reserved_capacity_never_asks_for_zero_on_a_tiny_file() {
         let mut vertices = Vec::new();
         let mut edges = Vec::new();
-        reserve_for_declared_counts(&mut vertices, &mut edges, &mut Vec::new(), 8, 12, 3);
+        reserve_for_declared_counts(&mut vertices, &mut edges, 8, 12, 3);
         assert!(vertices.capacity() >= 1);
         assert!(edges.capacity() >= 1);
     }

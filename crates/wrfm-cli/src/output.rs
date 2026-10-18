@@ -18,7 +18,7 @@
 //! is a real failure, not a consumer walking away.
 
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
@@ -39,6 +39,34 @@ pub fn stderr(args: fmt::Arguments<'_>) {
 pub fn flush() {
     if !STDOUT_CLOSED.load(Ordering::Relaxed) {
         let _ = io::stdout().flush();
+    }
+}
+
+/// Stream a serialized document to stdout under the same broken-pipe policy as
+/// [`stdout`]: a consumer that closed the pipe ends the stream silently (the
+/// verdict still reaches the exit code), every other write error is fatal.
+///
+/// The body writes into a buffered sink, so a line-by-line serializer
+/// ([`crate::load::write_model`]) neither pays a syscall per line nor trips the
+/// `LineWriter` flush-on-newline — keeping the streaming path as fast as a bulk
+/// write while never materializing the whole document.
+pub fn stdout_stream<F>(f: F)
+where
+    F: FnOnce(&mut dyn Write) -> std::io::Result<()>,
+{
+    if STDOUT_CLOSED.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut w = BufWriter::new(io::stdout().lock());
+    let result = f(&mut w).and_then(|()| w.flush());
+    if let Err(e) = result {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            // The consumer is gone: drop the rest of the output, keep going so
+            // the verdict still reaches the exit code.
+            STDOUT_CLOSED.store(true, Ordering::Relaxed);
+            return;
+        }
+        panic!("failed printing to stdout: {e}");
     }
 }
 

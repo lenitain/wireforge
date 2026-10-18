@@ -147,48 +147,86 @@ impl WrfmModel {
     /// Serialize the canonical v2 text into `w`.
     #[cfg(feature = "std")]
     fn write_to<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
-        writeln!(w, "wrfm {}", self.version)?;
-        writeln!(
-            w,
-            "vertices {}   edges {}",
-            self.vertices.len(),
-            self.edges.len()
-        )?;
-        writeln!(w)?;
+        write_canonical(w, self.version, &self.vertices, &self.edges, &self.groups)
+    }
+}
 
-        let n = self.vertices.len();
-        if self.groups.is_empty() {
-            for (x, y, z) in &self.vertices {
+/// Serialize the canonical v2 text from borrowed model parts into `w`.
+///
+/// This is the zero-clone streaming core behind [`WrfmModel::write_to`] and
+/// [`WrfmModel::save_to_file`]: it reads the geometry through slices, so a
+/// caller holding a `wrfm_raster::Model` (or any vertex/edge pair) can emit
+/// canonical text without first building an owned [`WrfmModel`] — which would
+/// clone the vertices and edges — and without materializing the whole document
+/// in a `String`. Lines stream out as they are formatted.
+#[cfg(feature = "std")]
+pub fn write_canonical<W: Write + ?Sized>(
+    w: &mut W,
+    version: u32,
+    vertices: &[(f64, f64, f64)],
+    edges: &[(usize, usize)],
+    groups: &[Group],
+) -> std::io::Result<()> {
+    writeln!(w, "wrfm {}", version)?;
+    writeln!(w, "vertices {}   edges {}", vertices.len(), edges.len())?;
+    writeln!(w)?;
+
+    let n = vertices.len();
+    if groups.is_empty() {
+        for (x, y, z) in vertices {
+            writeln!(w, "v {} {} {}", x, y, z)?;
+        }
+    } else {
+        // Vertices before the first group (or between groups) form the
+        // implicit unnamed section and are written without a `group`
+        // line, in global order.
+        let mut cursor = 0;
+        for g in groups {
+            let gs = g.vertex_start.min(n);
+            let ge = g.vertex_end.min(n);
+            for (x, y, z) in &vertices[cursor..gs] {
                 writeln!(w, "v {} {} {}", x, y, z)?;
             }
-        } else {
-            // Vertices before the first group (or between groups) form the
-            // implicit unnamed section and are written without a `group`
-            // line, in global order.
-            let mut cursor = 0;
-            for g in &self.groups {
-                let gs = g.vertex_start.min(n);
-                let ge = g.vertex_end.min(n);
-                for (x, y, z) in &self.vertices[cursor..gs] {
-                    writeln!(w, "v {} {} {}", x, y, z)?;
+            writeln!(w, "group {}", g.name)?;
+            if ge > gs {
+                for (x, y, z) in &vertices[gs..ge] {
+                    writeln!(w, "  v {} {} {}", x, y, z)?;
                 }
-                writeln!(w, "group {}", g.name)?;
-                if ge > gs {
-                    for (x, y, z) in &self.vertices[gs..ge] {
-                        writeln!(w, "  v {} {} {}", x, y, z)?;
-                    }
-                }
-                cursor = ge.max(gs);
             }
-            for (x, y, z) in &self.vertices[cursor..] {
-                writeln!(w, "v {} {} {}", x, y, z)?;
-            }
+            cursor = ge.max(gs);
         }
+        for (x, y, z) in &vertices[cursor..] {
+            writeln!(w, "v {} {} {}", x, y, z)?;
+        }
+    }
 
-        writeln!(w)?;
-        for (a, b) in &self.edges {
-            writeln!(w, "e {} {}", a, b)?;
-        }
+    writeln!(w)?;
+    for (a, b) in edges {
+        writeln!(w, "e {} {}", a, b)?;
+    }
+    Ok(())
+}
+
+/// Adapter that streams [`write_canonical`]'s UTF-8 output straight into a
+/// [`fmt::Formatter`], so [`fmt::Display`] never buffers the whole document in
+/// an intermediate `Vec<u8>` + `String` before handing it to the caller.
+#[cfg(feature = "std")]
+struct FormatterSink<'a, 'b>(&'a mut fmt::Formatter<'b>);
+
+#[cfg(feature = "std")]
+impl Write for FormatterSink<'_, '_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // `write_canonical` emits UTF-8 throughout (literals + `Display`ed
+        // numbers/indices are all ASCII), so every chunk decodes cleanly.
+        let s = core::str::from_utf8(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        self.0
+            .write_str(s)
+            .map_err(|_| std::io::Error::other("formatter write failed"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -211,11 +249,10 @@ impl WrfmModel {
 #[cfg(feature = "std")]
 impl fmt::Display for WrfmModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Vec<u8> implements io::Write; serialization cannot fail.
-        let mut buf: Vec<u8> = Vec::new();
-        self.write_to(&mut buf)
-            .expect("wrfm serialization into a Vec<u8> cannot fail");
-        f.write_str(&String::from_utf8(buf).expect("canonical v2 text is always valid UTF-8"))
+        // Stream straight into the formatter via FormatterSink: no intermediate
+        // Vec<u8> + String copy of the whole document.
+        let mut sink = FormatterSink(f);
+        self.write_to(&mut sink).map_err(|_| fmt::Error)
     }
 }
 

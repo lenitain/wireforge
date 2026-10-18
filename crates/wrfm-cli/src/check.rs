@@ -98,29 +98,36 @@ pub fn degrees(m: &Model) -> Vec<usize> {
     deg
 }
 
+/// Sentinel for "this vertex has no such incident edge" in the `first`/`second`
+/// tables: a `Vec<usize>` keyed by this is half the memory of a
+/// `Vec<Option<usize>>` (`Option<usize>` has no niche, so it costs 16 bytes a
+/// slot vs 8), and edge indices are always `< edges.len()`, never `usize::MAX`.
+const NO_EDGE: usize = usize::MAX;
+
 /// Up to two incident EDGE INDICES per vertex, in one pass over the edges.
 ///
 /// This is the lookup `redundant_vertices` needs: the old form walked the whole
 /// edge list once per degree-2 vertex to find its neighbours, which is O(V x E)
 /// and quadratic on the shapes that are almost entirely interior vertices — a
 /// 90k-vertex chain spent ~11 s deciding a verdict. `first`/`second` are what
-/// replaced that scan.
-fn incident_edges(m: &Model) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
+/// replaced that scan. A slot stays [`NO_EDGE`] when the vertex has fewer than
+/// two incident edges.
+fn incident_edges(m: &Model) -> (Vec<usize>, Vec<usize>) {
     let n = m.vertices.len();
-    let mut first: Vec<Option<usize>> = vec![None; n];
-    let mut second: Vec<Option<usize>> = vec![None; n];
+    let mut first = vec![NO_EDGE; n];
+    let mut second = vec![NO_EDGE; n];
     for (ei, &(a, b)) in m.edges.iter().enumerate() {
         for v in [a, b] {
             if let Some(slot) = first.get_mut(v)
-                && slot.is_none()
+                && *slot == NO_EDGE
             {
-                *slot = Some(ei);
+                *slot = ei;
                 continue;
             }
             if let Some(slot) = second.get_mut(v)
-                && slot.is_none()
+                && *slot == NO_EDGE
             {
-                *slot = Some(ei);
+                *slot = ei;
             }
         }
     }
@@ -132,11 +139,11 @@ fn incident_edges(m: &Model) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
 /// `degrees` is kept as the authority on what a degree IS (see its callers);
 /// this derives the identical table from the same walk that fills the pairs, so
 /// `check` does not traverse the edge list twice.
-fn degrees_and_incident(m: &Model) -> (Vec<usize>, Vec<Option<usize>>, Vec<Option<usize>>) {
+fn degrees_and_incident(m: &Model) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
     let n = m.vertices.len();
     let mut deg = vec![0usize; n];
-    let mut first: Vec<Option<usize>> = vec![None; n];
-    let mut second: Vec<Option<usize>> = vec![None; n];
+    let mut first = vec![NO_EDGE; n];
+    let mut second = vec![NO_EDGE; n];
     for (ei, &(a, b)) in m.edges.iter().enumerate() {
         // Degree: both endpoints count, and `a == b` counts twice — exactly
         // what `degrees` does.
@@ -148,15 +155,15 @@ fn degrees_and_incident(m: &Model) -> (Vec<usize>, Vec<Option<usize>>, Vec<Optio
         }
         for v in [a, b] {
             if let Some(slot) = first.get_mut(v)
-                && slot.is_none()
+                && *slot == NO_EDGE
             {
-                *slot = Some(ei);
+                *slot = ei;
                 continue;
             }
             if let Some(slot) = second.get_mut(v)
-                && slot.is_none()
+                && *slot == NO_EDGE
             {
-                *slot = Some(ei);
+                *slot = ei;
             }
         }
     }
@@ -172,6 +179,18 @@ fn degrees_and_incident(m: &Model) -> (Vec<usize>, Vec<Option<usize>>, Vec<Optio
 /// difference from the old blanket "every degree 2 is non-manifold" rule.
 pub fn redundant_vertices(m: &Model, deg: &[usize]) -> Vec<usize> {
     let (first, second) = incident_edges(m);
+    redundant_from_incident(m, deg, &first, &second)
+}
+
+/// [`redundant_vertices`] over precomputed incident-edge tables, so a caller
+/// that already walked the edges once ([`findings`] via
+/// [`degrees_and_incident`]) reuses them instead of walking them again.
+fn redundant_from_incident(
+    m: &Model,
+    deg: &[usize],
+    first: &[usize],
+    second: &[usize],
+) -> Vec<usize> {
     m.vertices
         .iter()
         .enumerate()
@@ -186,13 +205,14 @@ pub fn redundant_vertices(m: &Model, deg: &[usize]) -> Vec<usize> {
 /// duplicated edges — both broken verdicts caught elsewhere) are never
 /// redundant, and a corrupt out-of-range neighbour can never panic.
 ///
-/// `e1`/`e2` are two incident edge indices from [`incident_edges`]; taking them
-/// as arguments is what keeps this O(1) instead of a scan of the whole edge
+/// `e1`/`e2` are two incident edge indices from [`incident_edges`] (a
+/// [`NO_EDGE`] slot means the vertex has fewer than two); taking them as
+/// arguments is what keeps this O(1) instead of a scan of the whole edge
 /// list.
-fn is_redundant_midpoint(m: &Model, i: usize, e1: Option<usize>, e2: Option<usize>) -> bool {
-    let (Some(e1), Some(e2)) = (e1, e2) else {
+fn is_redundant_midpoint(m: &Model, i: usize, e1: usize, e2: usize) -> bool {
+    if e1 == NO_EDGE || e2 == NO_EDGE {
         return false;
-    };
+    }
     let other = |(a, b): (usize, usize)| if a == i { b } else { a };
     // A self-loop incident to `i` reports `i` as its other end, so it is
     // rejected below along with any duplicated neighbour.
@@ -351,7 +371,7 @@ fn findings(m: &Model, with_issues: bool) -> Findings {
     // All edge indices are valid (see the module-level invariant). An EMPTY
     // model keeps its historical one-slot table, so the scan below still
     // reports it `broken` (isolated vertex) instead of silently `ok`.
-    let (mut deg, first_incident, _second_incident) = degrees_and_incident(m);
+    let (mut deg, first_incident, second_incident) = degrees_and_incident(m);
     if n == 0 {
         deg.push(0);
     }
@@ -373,11 +393,22 @@ fn findings(m: &Model, with_issues: bool) -> Findings {
     let mut near_vertices: Vec<Value> = Vec::new();
     let (mut n_dup_vertices, mut n_near_vertices) = (0usize, 0usize);
     {
-        let mut exact: HashMap<(u64, u64, u64), usize> = HashMap::new();
         let mut grid = Grid::new(POINT_TOL);
+        grid.reserve(n);
         for (i, &v) in m.vertices.iter().enumerate() {
-            let bits = (v.0.to_bits(), v.1.to_bits(), v.2.to_bits());
-            if let Some(&twin) = exact.get(&bits) {
+            // A bit-identical twin shares `v`'s grid cell (identical coords hash
+            // to the same key), so the exact-duplicate check scans that one cell
+            // for the lowest already-inserted index with the same bit pattern —
+            // no separate `bits -> index` table. `to_bits` (not `==`) keeps the
+            // `-0.0` vs `0.0` distinction the old map keyed on. The scan
+            // short-circuits on the first match, so it is O(cell) and drops a
+            // per-vertex hash insert + lookup.
+            let vb = (v.0.to_bits(), v.1.to_bits(), v.2.to_bits());
+            let exact_twin = grid.indices_in_cell(v).iter().copied().find(|&j| {
+                let w = m.vertices[j];
+                (w.0.to_bits(), w.1.to_bits(), w.2.to_bits()) == vb
+            });
+            if let Some(twin) = exact_twin {
                 n_dup_vertices += 1;
                 if with_issues {
                     dup_vertices.push(json!({
@@ -387,7 +418,6 @@ fn findings(m: &Model, with_issues: bool) -> Findings {
                     }));
                 }
             } else {
-                exact.insert(bits, i);
                 // Detection, ALWAYS: a near-duplicate is a `warn`, and the warn
                 // travels on the exit code. Skipping it here made `wrfm edit
                 // --dedupe` exit 0 on a model with a 2e-16 twin (caught by
@@ -414,8 +444,15 @@ fn findings(m: &Model, with_issues: bool) -> Findings {
     // Zero-length edges.
     let mut zero_edges: Vec<Value> = Vec::new();
     let mut n_zero_edges = 0usize;
-    // Duplicate edges (unordered pairs).
-    let mut edge_count: HashMap<(usize, usize), usize> = HashMap::new();
+    // Duplicate edges (unordered pairs): collect the canonical `(min,max)`
+    // pair per edge packed into one `u64`, then find repeats with ONE sort + a
+    // run-length scan. Packing halves the scratch versus `(usize, usize)` and
+    // sorts faster as scalars; a `HashMap` count table would cost a load-factor
+    // bucket array for every edge on top of that. In-memory models hold fewer
+    // than 2^32 vertices (>100 GB of coordinates), so the two 32-bit halves
+    // always fit — and the packed value sorts in the same `(lo,hi)` order the
+    // report emits.
+    let mut pairs: Vec<u64> = Vec::with_capacity(m.edges.len());
     // `first_incident` came from `degrees_and_incident` above: it replaces the
     // dangling pass's rescan of the whole edge list once per degree-1 vertex
     // (a star graph was quadratic: 30k leaves cost 2.5 s in a command that only
@@ -432,21 +469,28 @@ fn findings(m: &Model, with_issues: bool) -> Findings {
                 zero_edges.push(json!({ "edge": [a, b], "distance": d2.sqrt() }));
             }
         }
-        let key = (a.min(b), a.max(b));
-        *edge_count.entry(key).or_insert(0) += 1;
+        let (lo, hi) = (a.min(b), a.max(b));
+        pairs.push(((lo as u64) << 32) | hi as u64);
     }
+    pairs.sort_unstable();
     let mut dup_edges: Vec<Value> = Vec::new();
-    let mut counts: Vec<(usize, usize, usize)> = edge_count
-        .iter()
-        .filter(|(_, c)| **c > 1)
-        .map(|(&(a, b), &c)| (a, b, c))
-        .collect();
-    counts.sort();
-    let n_dup_edges = counts.len();
-    if with_issues {
-        for (a, b, c) in counts {
-            dup_edges.push(json!({ "edge": [a, b], "repeats": c }));
+    let mut n_dup_edges = 0usize;
+    let mut run = 0usize;
+    while run < pairs.len() {
+        let key = pairs[run];
+        let mut end = run;
+        while end < pairs.len() && pairs[end] == key {
+            end += 1;
         }
+        let repeats = end - run;
+        if repeats > 1 {
+            n_dup_edges += 1;
+            if with_issues {
+                dup_edges
+                    .push(json!({ "edge": [key >> 32, key & 0xffff_ffff], "repeats": repeats }));
+            }
+        }
+        run = end;
     }
 
     // Dangling edges (touch a degree-1 vertex) and isolated vertices.
@@ -459,7 +503,7 @@ fn findings(m: &Model, with_issues: bool) -> Findings {
         } else if d == 1 {
             // A degree-1 vertex has exactly one incident edge; `first_incident`
             // remembers which without scanning the edge list again.
-            if let Some(ei) = first_incident.get(i).copied().flatten() {
+            if let Some(ei) = first_incident.get(i).copied().filter(|&e| e != NO_EDGE) {
                 n_dangling += 1;
                 if with_issues {
                     let (a, b) = m.edges[ei];
@@ -475,7 +519,7 @@ fn findings(m: &Model, with_issues: bool) -> Findings {
     // Redundant vertices: degree-2 midpoints on the straight chord between
     // their neighbours (see `redundant_vertices`) — pass-throughs, not
     // corners.
-    let found_redundant = redundant_vertices(m, &deg);
+    let found_redundant = redundant_from_incident(m, &deg, &first_incident, &second_incident);
     let n_redundant = found_redundant.len();
     let redundant: Vec<Value> = if with_issues {
         found_redundant

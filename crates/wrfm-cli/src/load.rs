@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use wrfm::WrfmModel;
 use wrfm_raster::Model;
 
@@ -70,12 +70,15 @@ fn render_load_error(source: &str, e: &wrfm::LoadError) -> String {
     }
 }
 
-/// Serialize a geometry `Model` back to canonical `.wrfm` v2 TEXT (magic + counts header + groups + edges).
-pub fn serialize_model(m: &Model, name: &str, groups: &[wrfm::Group], version: u32) -> String {
-    let mut raw = WrfmModel::new(name);
-    raw.vertices = m.vertices.clone();
-    raw.edges = m.edges.clone();
-    raw.groups = groups.to_vec();
-    raw.version = version;
-    raw.to_string()
+/// Stream a geometry `Model` as canonical `.wrfm` v2 TEXT (magic + counts
+/// header + groups + edges) into `w`, borrowing the geometry — no vertex/edge
+/// clone and no whole-document `String`. Callers push straight to stdout
+/// (`wrfm transform a --scale 2 > big.wrfm`) or into a buffer for `--check`.
+pub fn write_model<W: Write + ?Sized>(
+    w: &mut W,
+    m: &Model,
+    groups: &[wrfm::Group],
+    version: u32,
+) -> std::io::Result<()> {
+    wrfm::write_canonical(w, version, &m.vertices, &m.edges, groups)
 }

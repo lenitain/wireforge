@@ -7,11 +7,51 @@
 //! on which pairs count.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 /// Points closer than this (world units, strict `<`) count as the same
 /// point. Absolute, not relative: models whose units are far from 1 should
 /// pass an explicit `--weld TOL` instead of relying on this default.
 pub const POINT_TOL: f64 = 1e-6;
+
+/// One cell's point indices.
+///
+/// A single point is the common case — near-duplicates are rare, so almost every
+/// cell holds exactly one — so it lives inline and only spills to a heap `Vec`
+/// when a second point lands in the same cell. This drops the one-allocation-per-
+/// vertex the old always-`Vec` form paid on the common path.
+enum Cell {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl Cell {
+    /// Append `index`, promoting the inline single value to a heap `Vec` only
+    /// when a second point actually arrives.
+    fn push(&mut self, index: usize) {
+        if let Cell::Many(v) = self {
+            v.push(index);
+            return;
+        }
+        let first = match std::mem::replace(self, Cell::Many(Vec::new())) {
+            Cell::One(i) => i,
+            Cell::Many(v) => {
+                // Unreachable: the `if let` above already routed `Many` here.
+                *self = Cell::Many(v);
+                return;
+            }
+        };
+        *self = Cell::Many(vec![first, index]);
+    }
+
+    /// The cell's indices as a slice, so the 27-cell probe iterates one shape.
+    fn as_slice(&self) -> &[usize] {
+        match self {
+            Cell::One(j) => std::slice::from_ref(j),
+            Cell::Many(v) => v,
+        }
+    }
+}
 
 /// Uniform spatial hash with a fixed cell size.
 ///
@@ -25,7 +65,7 @@ pub const POINT_TOL: f64 = 1e-6;
 /// equals the query tolerance.
 pub struct Grid {
     cell: f64,
-    cells: HashMap<(i64, i64, i64), Vec<usize>>,
+    cells: HashMap<(i64, i64, i64), Cell>,
 }
 
 impl Grid {
@@ -51,8 +91,36 @@ impl Grid {
 
     /// Record `index` (an index into the point list the caller is scanning).
     pub fn insert(&mut self, index: usize, p: (f64, f64, f64)) {
-        let k = self.key(p);
-        self.cells.entry(k).or_default().push(index);
+        match self.cells.entry(self.key(p)) {
+            Entry::Vacant(e) => {
+                e.insert(Cell::One(index));
+            }
+            Entry::Occupied(mut e) => e.get_mut().push(index),
+        }
+    }
+
+    /// Reserve cell capacity for `additional` more points before a bulk load.
+    ///
+    /// A spatial hash grows by repeated rehash, and a rehash keeps the old and
+    /// new bucket arrays live at once — a transient peak above the steady state
+    /// that massif flags as the top allocator for large `check` runs. Reserving
+    /// up front trades that spike for one exact-size table.
+    pub fn reserve(&mut self, additional: usize) {
+        self.cells.reserve(additional);
+    }
+
+    /// The point indices already inserted into `p`'s own cell, in ascending
+    /// index order.
+    ///
+    /// A point's bit-identical twin shares its cell — identical coordinates
+    /// hash to the same key — so `check` finds exact duplicates by scanning
+    /// this slice instead of a separate `bits -> index` table. Ascending order
+    /// means a scan's first match is the lowest-index match.
+    pub fn indices_in_cell(&self, p: (f64, f64, f64)) -> &[usize] {
+        self.cells
+            .get(&self.key(p))
+            .map(|c| c.as_slice())
+            .unwrap_or(&[])
     }
 
     /// The LOWEST index among the inserted points strictly closer than `tol`
@@ -81,7 +149,7 @@ impl Grid {
                     let Some(cands) = self.cells.get(&cell) else {
                         continue;
                     };
-                    for &j in cands {
+                    for &j in cands.as_slice() {
                         let q = points[j];
                         let d2 = (p.0 - q.0).powi(2) + (p.1 - q.1).powi(2) + (p.2 - q.2).powi(2);
                         if d2 < tol2 {

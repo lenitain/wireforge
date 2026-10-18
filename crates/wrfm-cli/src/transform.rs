@@ -201,7 +201,11 @@ fn align_rot(m: &Model, axis: AlignAxis) -> [[f64; 3]; 3] {
 }
 
 /// Apply the transform to every vertex; edges (indices) are unchanged.
-pub fn apply(model: &Model, t: &Transform) -> Model {
+///
+/// Split out from [`apply`] so a caller that already owns the source can move
+/// its edge list instead of cloning it (a transform maps vertices 1:1 and
+/// leaves connectivity untouched).
+pub fn transform_vertices(model: &Model, t: &Transform) -> Vec<(f64, f64, f64)> {
     // 1. Pivot point; `--to-origin` overrides it to the bbox centre and adds
     // `-P` to the final translation.
     let (p, t_extra) = if t.to_origin {
@@ -252,7 +256,7 @@ pub fn apply(model: &Model, t: &Transform) -> Model {
         t.translate[2] + t_extra[2],
     ];
 
-    let vertices = model
+    model
         .vertices
         .iter()
         .map(|&(x, y, z)| {
@@ -265,9 +269,19 @@ pub fn apply(model: &Model, t: &Transform) -> Model {
                 mat[2][0] * dx + mat[2][1] * dy + mat[2][2] * dz + p[2] + tt[2],
             )
         })
-        .collect();
+        .collect()
+}
+
+/// Apply the transform to every vertex; edges (indices) are unchanged.
+///
+/// The owned-model convenience form. Production code calls
+/// [`transform_vertices`] directly so it can MOVE the source edge list in
+/// instead of cloning it; this wrapper keeps the cloning form for callers that
+/// only have a borrowed model (the tests).
+#[cfg(test)]
+pub fn apply(model: &Model, t: &Transform) -> Model {
     Model {
-        vertices,
+        vertices: transform_vertices(model, t),
         edges: model.edges.clone(),
     }
 }

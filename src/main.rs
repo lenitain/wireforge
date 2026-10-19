@@ -1,4 +1,3 @@
-use clap::Parser;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
@@ -57,22 +56,112 @@ const RESIZE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 /// keeps a tap's drift short. Terminals that DO report Release never use it.
 const LEGACY_HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "wireforge",
-    author,
-    version,
-    about = "TUI viewer for .wrfm 3D wireframe models"
-)]
+/// Command-line arguments the viewer accepts: one optional positional `FILE`
+/// and one optional `--vfov` flag. Parsed by hand in [`Args::parse`]; the whole
+/// surface is two arguments, so a parser crate would weigh more than the code
+/// that reads them.
 struct Args {
     /// `.wrfm` file to open, or `-` to read from stdin (the default when stdin is
-    /// not a terminal). Omit it on a terminal to open an empty canvas
+    /// not a terminal). Omit it on a terminal to open an empty canvas.
     file: Option<PathBuf>,
-    /// Vertical field of view in RADIANS (default 1.0; must be > 0 and <= 3).
+    /// Vertical field of view in RADIANS (default 0.5; must be > 0 and <= 3).
     /// The horizontal field follows from the terminal's aspect ratio and is
     /// never clamped — content outside the frustum is simply not drawn.
-    #[arg(long, default_value_t = DEFAULT_VFOV)]
     vfov: f64,
+}
+
+/// The `--help` text, kept close to the conventional layout so a user who
+/// knows clap finds the same facts here.
+const USAGE: &str = concat!(
+    "TUI viewer for .wrfm 3D wireframe models\n",
+    "\n",
+    "Usage: wireforge [OPTIONS] [FILE]\n",
+    "\n",
+    "Arguments:\n",
+    "  [FILE]  `.wrfm` file to open, or `-` to read from stdin (the default when stdin is\n",
+    "          not a terminal). Omit it on a terminal to open an empty canvas\n",
+    "\n",
+    "Options:\n",
+    "      --vfov <VFOV>  Vertical field of view in RADIANS (default 0.5; must be > 0 and <= 3).\n",
+    "                     The horizontal field follows from the terminal's aspect ratio and is\n",
+    "                     never clamped — content outside the frustum is simply not drawn\n",
+    "  -h, --help         Print help\n",
+    "  -V, --version      Print version\n",
+);
+
+/// Print a command-line mistake to stderr and exit with the conventional usage
+/// code (2), as a parser crate would.
+fn fail_usage(message: &str) -> ! {
+    eprintln!("error: {message}\n\nFor more information, try '--help'.");
+    std::process::exit(2);
+}
+
+/// Parse a `--vfov` value into a finite `f64`. Range validation against
+/// `(0, MAX_VFOV]` happens in [`main`], before any terminal setup.
+fn parse_vfov(raw: &str) -> f64 {
+    match raw.parse::<f64>() {
+        Ok(v) if v.is_finite() => v,
+        _ => fail_usage(&format!(
+            "invalid value '{raw}' for '--vfov <VFOV>': expected a number in radians"
+        )),
+    }
+}
+
+impl Args {
+    /// Read the command line from the process arguments.
+    ///
+    /// `--help`/`-h` and `--version`/`-V` print to stdout and exit 0; anything
+    /// unrecognized is a usage error. `--` ends option parsing so a file whose
+    /// name starts with `-` is still reachable.
+    fn parse() -> Args {
+        let mut args = Args {
+            file: None,
+            vfov: DEFAULT_VFOV,
+        };
+        let mut argv = std::env::args_os().skip(1);
+        while let Some(arg) = argv.next() {
+            let text = arg.to_string_lossy().into_owned();
+            match text.as_str() {
+                "-h" | "--help" => {
+                    print!("{USAGE}");
+                    std::process::exit(0);
+                }
+                "-V" | "--version" => {
+                    println!("wireforge {}", env!("CARGO_PKG_VERSION"));
+                    std::process::exit(0);
+                }
+                // Everything after `--` is positional, so a filename that
+                // begins with a dash is never read as an option.
+                "--" => {
+                    for rest in argv.by_ref() {
+                        if args.file.is_none() {
+                            args.file = Some(PathBuf::from(rest));
+                        }
+                    }
+                }
+                _ if text.starts_with("--vfov=") => {
+                    args.vfov = parse_vfov(&text["--vfov=".len()..]);
+                }
+                "--vfov" => {
+                    let Some(value) = argv.next() else {
+                        fail_usage("a value is required for '--vfov <VFOV>' but none was supplied");
+                    };
+                    args.vfov = parse_vfov(&value.to_string_lossy());
+                }
+                // A lone `-` is the stdin sentinel, not an option.
+                _ if text.starts_with('-') && text != "-" => {
+                    fail_usage(&format!("unexpected argument '{text}'"));
+                }
+                _ => {
+                    if args.file.is_some() {
+                        fail_usage(&format!("unexpected argument '{text}'"));
+                    }
+                    args.file = Some(PathBuf::from(arg));
+                }
+            }
+        }
+        args
+    }
 }
 
 /// HUD folding state: `?` toggles Collapsed <-> Expanded.

@@ -814,7 +814,7 @@ fn write_telemetry_line(view: &ViewState, out: &mut String) {
     out.clear();
     write!(
         out,
-        "yaw={:.2} pitch={:.2} roll={:.2} dist={:.2} pan=({:.2},{:.2})",
+        "  yaw={:.2}  pitch={:.2}  roll={:.2}  distance={:.2}  pan=({:.2},{:.2})",
         view.yaw, view.pitch, view.roll, view.dist, view.pan_x, view.pan_y
     )
     .expect("writing telemetry into a String cannot fail");
@@ -2408,13 +2408,16 @@ mod tests {
         };
         let mut row0 = String::new();
         write_telemetry_line(&view, &mut row0);
-        assert!(row0.starts_with("yaw=0.50"), "camera leads the row: {row0}");
+        assert!(
+            row0.starts_with("  yaw=0.50"),
+            "camera leads the row: {row0}"
+        );
         assert!(
             row0.contains("pitch=") && row0.contains("roll="),
             "row0: {row0}"
         );
         assert!(
-            row0.contains("dist=") && row0.contains("pan=("),
+            row0.contains("distance=") && row0.contains("pan=("),
             "row0: {row0}"
         );
         assert!(
@@ -2909,7 +2912,7 @@ mod tests {
         let mut row0 = String::new();
         write_telemetry_line(&app.view, &mut row0);
         assert!(
-            row0.contains("dist="),
+            row0.contains("distance="),
             "row 0 keeps reporting the camera either way"
         );
     }

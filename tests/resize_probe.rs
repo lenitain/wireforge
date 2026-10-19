@@ -229,7 +229,7 @@ fn no_file_argument_opens_the_empty_space() {
     let text = strip_ansi(&String::from_utf8_lossy(&seen));
     eprintln!("no-args probe: {} bytes of TUI output", seen.len());
     assert!(
-        text.contains("yaw=") && text.contains("dist="),
+        text.contains("yaw=") && text.contains("distance="),
         "blank viewer must render its telemetry row, got: {text:?}"
     );
     // ratatui's diff-based present skips spaces and repaints only changed

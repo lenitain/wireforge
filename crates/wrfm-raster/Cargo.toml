@@ -1,6 +1,6 @@
 [package]
 name = "wrfm-raster"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 description = "Shared camera projection and braille rasterization for wireforge and wrfm-cli"
 readme = "README.md"

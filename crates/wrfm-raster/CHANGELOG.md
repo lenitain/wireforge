@@ -12,6 +12,8 @@ version this crate's `Cargo.toml` carried in git on that date. Sibling histories
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-19
+
 ### Added
 
 - Model-extent helpers, so a viewer can measure the bounding box once per model

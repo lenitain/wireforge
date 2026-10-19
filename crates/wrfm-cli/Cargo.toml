@@ -1,6 +1,6 @@
 [package]
 name = "wrfm-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 description = "Streaming command-line tool for .wrfm 3D wireframe models"
 readme = "README.md"

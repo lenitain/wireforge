@@ -47,7 +47,7 @@ The `std` feature is on by default. Turn it off to parse models without the
 standard library (the crate then needs only `alloc`):
 
 ```toml
-wrfm = { version = "0.5", default-features = false }
+wrfm = { version = "0.6", default-features = false }
 ```
 
 `from_str` and the model types work either way; `from_file`, `save_to_file`,

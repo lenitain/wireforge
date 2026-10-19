@@ -16,16 +16,17 @@ crate's `Cargo.toml` carried in git on that date. Sibling histories:
 
 - The parser rejects non-finite (`±inf`, `NaN`) vertex coordinates with the new
   `NotFinite` error variant instead of letting them reach bbox and projection.
-  Fixture-driven parser tests in `tests/fixtures/` back the grammar: 44 `.wrfm`
+  Fixture-driven parser tests in `tests/fixtures/` back the grammar: 45 `.wrfm`
   files plus a single manifest of expected outcomes.
 - The authoritative `.wrfm` v2 format spec lives at
-  [`docs/wrfm-spec.md`](docs/wrfm-spec.md).
+  [`docs/wrfm-spec.md`](docs/wrfm-spec.md). **Breaking** for any downstream
+  doc that scraped the old locations.
 
 ### Performance
 
 - Parsing reuses one token buffer for the whole parse, reserves the model
-  vectors from the header counts, and stores edge lines as spans rather than
-  string copies.
+  vectors from the header counts, and recovers edge source positions lazily on
+  the error path rather than storing per-edge metadata.
 - Incident-edge tables use a `usize::MAX` sentinel (half the memory) and are
   reused across the check pipeline instead of rebuilt.
 

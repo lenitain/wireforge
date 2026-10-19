@@ -73,8 +73,9 @@ The name sits on the accent colour, the two lamps report whether the model is
 spinning and whether the axes are drawn (a lit dot means on), and the
 right-hand hints carry the everyday chords. The strip fills the row edge to
 edge, and the pill yields at most half of it so a long name can never crowd
-out the rest. When the terminal is too narrow for all of it, the lamps are
-dropped, then the name is shortened with `…`. `?` always opens the full list.
+out the rest. When the terminal is too narrow for all of it, the hints are
+shed first, then the lamps are dropped, then the name is shortened with `…`.
+`?` always opens the full list.
 
 ### Stream input
 
@@ -128,9 +129,9 @@ The bindings are declared once, in one table in the source. The viewer's key
 lookup is generated from that table by the compiler, and the statusline hints
 read it directly — so a rebind moves the keyboard and the hints together. The
 help overlay is not generated: it is written out by hand, and a test checks
-every chord in the table against that page, so the two cannot drift apart
-without the suite failing. The tables below are that same list written out for
-reading.
+every binding's chord in the table against that page, so the two cannot drift
+apart without the suite failing. The tables below are that same list written
+out for reading.
 
 #### Rotate — the world's axes
 
@@ -178,12 +179,12 @@ Same turns, but around the model's own frame: `Ctrl+h` yaws it to _its_ left.
 
 #### Session
 
-| Key                    | Action           |
-| :--------------------- | :--------------- |
-| `Space`                | toggle spinning  |
-| `Tab` / `Shift+Tab`    | toggle the axes  |
-| `?`                    | toggle this help |
-| `q` / `Esc` / `Ctrl+c` | quit             |
+| Key                               | Action           |
+| :-------------------------------- | :--------------- |
+| `Space`                           | toggle spinning  |
+| `Tab` / `Shift+Tab`               | toggle the axes  |
+| `?`                               | toggle this help |
+| `q` / `Esc` / `Ctrl+c` / `Ctrl+q` | quit             |
 
 The help overlay lists every binding, grouped the same way.
 

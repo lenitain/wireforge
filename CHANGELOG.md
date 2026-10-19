@@ -24,16 +24,18 @@ carried in git on that date.
 - The viewer opens with an empty canvas when no `FILE` is given.
 - A lualine-style statusline in the viewer, with the hints trimmed to `?` and
   `q`.
-- `R` resets the view in the viewer.
+- `r` resets the view in the viewer.
 - Example asset `utah-teapot.wrfm`.
 
 ### Changed
 
 - Vertical FOV is a renderer parameter in radians (`vfov`), defaulting to 0.5.
+  **Breaking** for anyone reading the renderer internals.
 - `d`/`f` roll the model instead of rotating the camera. **Breaking.**
 - Pan and dolly speed are pinned to the initial distance (they close in 5 s at
   the initial pose), and the fit margin is tightened (2.0 → 0.7), putting the
   model at ~71% of canvas height.
+- `Viewport` folds the former `grid` and `window` into one. **Breaking.**
 
 ### Fixed
 

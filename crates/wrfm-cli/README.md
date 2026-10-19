@@ -264,10 +264,11 @@ wrfm group m.wrfm | jq -r '.groups[] | "\(.name):\(.verdict)"'
 wrfm check m.wrfm | head -1
 # warn: model (278 vertices, 529 edges)
 
-# canonical-form CI gate (mirrors cargo fmt --check -q): exit 0 if the file
-# is already in canonical v2 surface form, exit 1 if re-canonicalization
-# would change bytes — no stdout either way
-wrfm fmt *.wrfm --check -q
+# canonical-form CI gate (mirrors cargo fmt --check -q) — `fmt` takes one
+# FILE per call, so a glob goes through a loop. Exit 0 if the file is already
+# in canonical v2 surface form, exit 1 if re-canonicalization would change
+# bytes — the surface verdict travels on the exit code alone, no stdout with -q
+for f in *.wrfm; do wrfm fmt "$f" --check -q || echo "not canonical: $f"; done
 
 # see what canonicalization would change (no unified diff yet; pipe the
 # canonical output into diff yourself)
@@ -301,15 +302,17 @@ script can branch on the number alone:
 
 | code | meaning |
 | :--- | :--- |
-| `0` | ok — result produced, health `ok` (`verify: pass`, `diff`, `format`, help) |
-| `1` | warn — result produced with a warning-level issue (`check: warn`) |
+| `0` | ok — result produced, health `ok` (`verify: pass`, `diff`, `fmt`, `format`, help) |
+| `1` | warn — result produced with a warning-level issue (`check: warn`; `fmt --check`: the surface is not canonical) |
 | `2` | broken — repair is required (`check: broken`, `verify: fail`; `--strict` upgrades a warn to this) |
 | `3` | no result — unreadable file, corrupt model, or usage error (including clap's own argument errors) |
 
 `render` / `info` / `group` / `geometry` / `query` / `view` / `transform` /
 `edit` / `convert` still emit their result on stdout and only the exit code
 carries the health tier; `check` puts its report on stdout and exits 1 for
-`warn`, 2 for `broken`.
+`warn`, 2 for `broken`. `diff`, `fmt` and `format` report their own result
+instead and carry no health tier: `fmt --check` exits 1 for a surface it would
+rewrite, exactly as `cargo fmt --check` does.
 
 ```bash
 wrfm check model.wrfm; echo "exit $?"

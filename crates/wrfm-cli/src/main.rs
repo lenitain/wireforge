@@ -47,8 +47,9 @@ AXIS     Y-UP: +Y is vertical (height); X and Z form the ground plane.
          A model built with Z as height appears lying on its side.
 
 GROUP EXAMPLE — groups are SECTIONS of the ONE global vertex list. The v
-lines under a group RE-LIST the global vertices that belong to it (in
-file order); indexing NEVER restarts in a group.
+lines under a group ARE the global vertices that belong to it: each v line
+adds one vertex to the one global list (in file order), and indexing
+NEVER restarts in a group.
 
   wrfm 2
   vertices 5   edges 4
@@ -70,11 +71,13 @@ STREAMS (three-channel contract — read this before piping):
   stdout = pure result (model text / JSON / render) — the data.
   stderr = diagnostics and errors; the health verdict travels on the exit
            code — run `wrfm check` for the report.
-  exit   = 0 ok · 1 warn (a warning-level health issue; every data command
-           still prints its result and exits 1 — only `check` prints the
-           report) · 2 broken (repair required: check broken, verify fail,
-           or --strict upgrading a warn) · 3 no result (unreadable file,
-           corrupt model, or usage error).
+  exit   = 0 ok · 1 warn (a warning-level health issue; every health-reporting
+           data command still prints its result and exits 1 — only `check`
+           prints the report) · 2 broken (repair required: check broken,
+           verify fail, or --strict upgrading a warn) · 3 no result
+           (unreadable file, corrupt model, or usage error).
+           `diff` / `fmt` / `format` carry no health tier: `fmt --check`
+           exits 1 for a surface it would rewrite, like `cargo fmt --check`.
   To pipe JSON/data do NOT merge stderr: use `wrfm info a.wrfm 2>/dev/null`
   (never `2>&1`) so diagnostics cannot corrupt the data stream.
   A consumer that closes the pipe early (e.g. `wrfm render m.wrfm | head`)
@@ -111,7 +114,7 @@ Authoritative spec: docs/wrfm-spec.md in the repository (https://github.com/leni
     name = "wrfm",
     version,
     about = "Read-only streaming CLI for .wrfm 3D wireframe models",
-    after_help = "Every model-input command accepts '-' for stdin. Nothing writes a file: use shell redirection.\nExit codes: 0 ok (clean result / verify pass) · 1 warn (a warning-level health issue in the model; every data command still prints its result and exits 1, only `check` prints the report) · 2 broken (repair required: check broken, an unmet verify declaration, or --strict upgrading a warn) · 3 no result (unreadable file, corrupt model, or usage error).\nPoint identity: vertices strictly closer than 1e-6 world units are the SAME point — `check` reports them as near-duplicate vertices and `wrfm edit --weld 1e-6` merges them (absolute threshold; pass an explicit --weld TOL when the model's units are far from 1).\n--format text|json exists on `check` / `query` / `diff` and selects their OUTPUT ENCODING: json is the machine-readable form, text is its projection (`info` / `geometry` / `group` / `view` always print JSON). `render --format` names the render style instead (braille|ascii|grid|both).\nRepair map (finding -> command): duplicate vertices -> --dedupe · near-duplicate vertices -> --weld 1e-6 · duplicate edges -> --dedupe · zero-length or dangling edges -> --clean · isolated vertices -> --clean · redundant (collinear degree-2) vertices have no repair action — accept them with `wrfm verify --expect-redundant N`.\nstderr carries diagnostics and errors only — the health verdict travels on the exit code (run `wrfm check` for the report).\nCompose atomic operations with pipes, e.g.:\n  wrfm edit m.wrfm --extract-group body | wrfm transform - --scale 2 --rotate-y 45\n  wrfm transform m.wrfm --mirror x | wrfm edit - --clean\nFormat spec: wrfm format (self-contained; no source needed)."
+    after_help = "Every model-input command accepts '-' for stdin. Nothing writes a file: use shell redirection.\nExit codes: 0 ok (clean result / verify pass) · 1 warn (a warning-level health issue in the model; every health-reporting data command still prints its result and exits 1 — only `check` prints the report) · 2 broken (repair required: check broken, an unmet verify declaration, or --strict upgrading a warn) · 3 no result (unreadable file, corrupt model, or usage error). `diff` / `fmt` / `format` carry no health tier — `fmt --check` exits 1 for a surface it would rewrite, as `cargo fmt --check` does.\nPoint identity: vertices strictly closer than 1e-6 world units are the SAME point — `check` reports them as near-duplicate vertices and `wrfm edit --weld 1e-6` merges them (absolute threshold; pass an explicit --weld TOL when the model's units are far from 1).\n--format text|json exists on `check` / `query` / `diff` and selects their OUTPUT ENCODING: json is the machine-readable form, text is its projection (`info` / `geometry` / `group` / `view` always print JSON). `render --format` names the render style instead (braille|ascii|grid|both).\nRepair map (finding -> command): duplicate vertices -> --dedupe · near-duplicate vertices -> --weld 1e-6 · duplicate edges -> --dedupe · zero-length or dangling edges -> --clean · isolated vertices -> --clean · redundant (collinear degree-2) vertices have no repair action — accept them with `wrfm verify --expect-redundant N`.\nstderr carries diagnostics and errors only — the health verdict travels on the exit code (run `wrfm check` for the report).\nCompose atomic operations with pipes, e.g.:\n  wrfm edit m.wrfm --extract-group body | wrfm transform - --scale 2 --rotate-y 45\n  wrfm transform m.wrfm --mirror x | wrfm edit - --clean\nFormat spec: wrfm format (self-contained; no source needed)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -127,7 +130,7 @@ enum Command {
         /// Scope the check to one group (the verdict is for the part only).
         #[arg(long)]
         group: Option<String>,
-        /// Upgrade warning-level issues (duplicates / dangling / redundant) to a broken verdict — without it they report `warn`.
+        /// Upgrade warning-level issues (duplicate / near-duplicate vertices, dangling edges, redundant vertices) to a broken verdict — without it they report `warn`. Zero-length, duplicate edges and isolated vertices are broken either way.
         #[arg(long)]
         strict: bool,
         /// text | json. JSON is the one machine-readable health form; text is its projection.
@@ -239,7 +242,7 @@ enum Command {
         /// Scope the view to one group.
         #[arg(long)]
         group: Option<String>,
-        /// Vertical field of view in RADIANS (default 1.0; must be > 0 and <= 3). Feeds the auto camera distance (--auto-dist).
+        /// Vertical field of view in RADIANS (default 0.5; must be > 0 and <= 3). Feeds the auto camera distance (--auto-dist).
         #[arg(long, default_value_t = DEFAULT_VFOV)]
         vfov: f64,
     },
@@ -297,7 +300,7 @@ enum Command {
         /// Render only this group (its vertices + the edges touching it).
         #[arg(long)]
         group: Option<String>,
-        /// Vertical field of view in RADIANS (default 1.0; must be > 0 and <= 3). The horizontal field follows from the canvas aspect ratio and is never clamped.
+        /// Vertical field of view in RADIANS (default 0.5; must be > 0 and <= 3). The horizontal field follows from the canvas aspect ratio and is never clamped.
         #[arg(long, default_value_t = DEFAULT_VFOV)]
         vfov: f64,
     },
@@ -311,7 +314,7 @@ enum Command {
         /// Per-axis scale factor; the total per-axis factor is `--scale * --scale-x` etc. (each default 1.0).
         #[arg(long, default_value_t = 1.0)]
         scale_x: f64,
-        /// Per-axis scale factor; total per-axis factor is `--scale * --scale-z` etc.
+        /// Per-axis scale factor; total per-axis factor is `--scale * --scale-y` etc.
         #[arg(long, default_value_t = 1.0)]
         scale_y: f64,
         /// Per-axis scale factor; total per-axis factor is `--scale * --scale-z` etc.
@@ -400,10 +403,10 @@ enum Command {
     Fmt {
         /// Path to the .wrfm file, or '-' to read the model from stdin.
         file: String,
-        /// Exit non-zero if re-canonicalization would change bytes; print the canonical form to stdout so `diff <(file) <(wrfm fmt file --check)` shows the exact change.
+        /// Exit non-zero if re-canonicalization would change bytes (exit 1, exactly as `cargo fmt --check` does — `fmt` carries no health tier); print the canonical form to stdout so `diff <(file) <(wrfm fmt file --check)` shows the exact change.
         #[arg(short, long)]
         check: bool,
-        /// Suppress all stdout output (the verdict still travels on the exit code; mirrors `cargo fmt -q`).
+        /// Suppress all stdout output (the canonical verdict still travels on the exit code; mirrors `cargo fmt -q`).
         #[arg(short, long)]
         quiet: bool,
     },
@@ -1660,15 +1663,13 @@ fn cmd_diff(a: &str, b: &str, format: &str) -> i32 {
 /// comments, and decimals like `1.0`. `#` comments are dropped silently in this
 /// version — preservation is a planned addition.
 ///
+/// `fmt` works on the SURFACE only, so its exit code carries no health tier
+/// (like `wrfm format` / `wrfm diff`): it reports the bytes and nothing else,
+/// exactly what `cargo fmt` / `cargo fmt --check` do.
+///
 /// Exit codes:
-/// * 0 — file is already canonical (or canonical text was produced from a
-///   model whose L2 verdict is `ok`).
-/// * 1 — `--check` mismatch (text would change), OR the model's L2 verdict
-///   is `warn` (the canonical-form verdict is the same tier as a `wrfm
-///   check` warning, mirroring the CLI's 4-tier scale; `--check` mismatch
-///   + `warn` still exits 1).
-/// * 2 — the model itself is `broken` (broken wins over `--check`'s warn,
-///   since broken is the higher-severity signal).
+/// * 0 — the surface was emitted, or `--check` found it already canonical.
+/// * 1 — `--check` only: re-canonicalization would change bytes.
 /// * 3 — I/O, UTF-8 or parse failure.
 fn cmd_fmt(file: &str, check: bool, quiet: bool) -> i32 {
     // Read raw bytes once. `-` consumes stdin, so the existing `load::load`
@@ -1715,28 +1716,28 @@ fn cmd_fmt(file: &str, check: bool, quiet: bool) -> i32 {
             return EXIT_NO_RESULT;
         }
     };
-    // MOVE (never clone) the geometry into the `Model` the verdict reads;
+    // MOVE (never clone) the geometry into the `Model` the writer emits;
     // groups/version stay on `raw` and are borrowed for serialization.
     let model = wrfm_raster::Model {
         vertices: raw.vertices,
         edges: raw.edges,
     };
-    let verdict = check::check_verdict(&model, false);
 
     if check {
         // `--check` compares the canonical emission against the input bytes
         // after stripping BOM and normalizing CRLF→LF. A model that is
         // already in canonical v2 surface form yields a clean 0; any
         // difference (extra spaces, comments, trailing newlines, ...) is a
-        // warn-tier signal. The canonical form is buffered here (and only
-        // here) because the comparison needs the whole thing at once.
+        // 1 — `cargo fmt --check` semantics, with no health tier involved.
+        // The canonical form is buffered here (and only here) because the
+        // comparison needs the whole thing at once.
         let mut canonical = Vec::new();
         load::write_model(&mut canonical, &model, &raw.groups, raw.version)
             .expect("serializing into a Vec<u8> cannot fail");
         let normalized = normalize_surface(&raw_bytes);
         if normalized == canonical {
             output::flush();
-            return exit_for(verdict);
+            return EXIT_OK;
         }
         // Mismatch. fmt has no unified-diff helper yet, so emit the canonical
         // form so the user can pipe into `diff` to see the exact change.
@@ -1745,18 +1746,14 @@ fn cmd_fmt(file: &str, check: bool, quiet: bool) -> i32 {
             output::stdout_stream(|w| w.write_all(&canonical));
         }
         output::flush();
-        return if verdict == "broken" {
-            EXIT_BROKEN
-        } else {
-            EXIT_WARN
-        };
+        return EXIT_WARN;
     }
 
     if !quiet {
         output::stdout_stream(|w| load::write_model(w, &model, &raw.groups, raw.version));
     }
     output::flush();
-    exit_for(verdict)
+    EXIT_OK
 }
 
 /// Strip a leading UTF-8 BOM (`U+FEFF` = `EF BB BF`) and replace CRLF with LF,

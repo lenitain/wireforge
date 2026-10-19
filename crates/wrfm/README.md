@@ -51,7 +51,8 @@ wrfm = { version = "0.5", default-features = false }
 ```
 
 `from_str` and the model types work either way; `from_file`, `save_to_file`,
-`LoadError` and the `Display` impl that serializes a model are `std`-only.
+`write_canonical`, `LoadError` and the `Display` impl that serializes a model
+are `std`-only.
 
 ### Loading a Model
 

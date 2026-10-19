@@ -147,7 +147,7 @@ comment, a blank line, or a `v` / `e` / `vertices` line — is reported as
 `ParseError::MissingMagic` (§6.1).
 
 A trailing `# ...` comment on the same line as the counts header is
-permitted (§5.1). A trailing `# ...` comment on the same line as a `v` or
+permitted (§6.2). A trailing `# ...` comment on the same line as a `v` or
 `e` line is permitted because parsers stop reading after the required
 tokens (§8.6); the `#` is not specially recognised there, but the
 observable behaviour is identical to a trailing comment.
@@ -196,8 +196,8 @@ counts header. Decimal point, exponent, base prefix and underscores are
 NOT accepted and SHALL be rejected as
 `ParseError::InvalidEdge::NotAnIndex` or `ParseError::MalformedHeader`.
 
-A `uint` token is the only accepted form for declared counts (§5.1) and
-edge indices (§5.3).
+A `uint` token is the only accepted form for declared counts (§6.2) and
+edge indices (§6.4).
 
 ### 4.5 Group name
 
@@ -280,7 +280,7 @@ version number. The reader SHALL accept the following outcomes:
 | `wrfm 2` | parsed, version = 2 |
 | `wrfm <N>` where `<N>` parses as an unsigned integer but `N != 2` | `ParseError::UnsupportedVersion` |
 | `wrfm` with no second token | `ParseError::MalformedMagic` |
-| `wrfm <X>` where `<X>` does not parse as an unsigned integer (e.g. `2.0`, `02a`, `-1`) | `ParseError::MalformedMagic` |
+| `wrfm <X>` where `<X>` does not parse as an unsigned integer (e.g. `2.0`, `02a`, `-1`) or does not fit in the reader's version type | `ParseError::MalformedMagic` |
 | Any other first line (including empty, comment, `vertices`, `v`, ...) | `ParseError::MissingMagic` |
 
 The version number is part of the magic line and cannot be repeated.
@@ -294,7 +294,7 @@ form
 vertices <N>   edges <M>
 ```
 
-with `<N>` and `<M>` non-negative integers (§4.5.2). A trailing `# ...`
+with `<N>` and `<M>` non-negative integers (§4.4.2). A trailing `# ...`
 comment on the same line is permitted (the first `#` token truncates the
 header for validation).
 
@@ -329,7 +329,7 @@ malformed input:
 * `v <x> ...` where the next token after `v` does not parse as a `float`,
   or the same for `y` or `z`:
   `ParseError::InvalidVertex { detail: NotANumber { token, axis } }`.
-* `v <x> ...` where the token does parse as a finite `float` but represents
+* `v <x> ...` where the token parses as a `float` but is non-finite —
   `+∞`, `−∞`, or `NaN` (case-insensitive, including the long forms
   `infinity` and `−infinity`):
   `ParseError::InvalidVertex { detail: NotFinite { token, axis } }`.
@@ -354,9 +354,12 @@ The two indices are read as `uint` (§4.4.2). Reader behaviour:
   `ParseError::InvalidEdge { detail: MissingIndex { which } }`.
 * First or second index does not parse as a `uint`:
   `ParseError::InvalidEdge { detail: NotAnIndex { token, which } }`.
-* First or second index begins with `-`:
+* First or second index is a `-` sign followed only by digits (e.g. `-1`,
+  `-0`):
   `ParseError::InvalidEdge { detail: NegativeIndex { index, which } }`.
-  (Note: `-0` is rejected. The parser special-cases the leading sign.)
+  (Note: `-0` is rejected. The parser special-cases the leading sign. A
+  token such as `-x` or a bare `-` carries no index and is a `NotAnIndex`,
+  not a `NegativeIndex`.)
 * After all content lines, any edge index `>= vertices.len()`:
   `ParseError::InvalidEdge { detail: OutOfRange { index, vertex_count, which } }`.
 
@@ -441,7 +444,7 @@ count as one column).
 | `UnsupportedVersion { line, column, line_text, version, token }` | Line 1 declares a version that parses as a `uint` but is not `2`. `version` is the parsed integer; `token` is the literal text. |
 | `MissingHeader { line, column, line_text }` | The first non-magic content line is not the counts header. A `#` comment or blank line before the header is tolerated (§8.1). |
 | `MalformedHeader { line, column, line_text, token }` | The counts header line exists but does not match `vertices <N>   edges <M>`. `token` is the offending token (empty when the header is merely truncated). |
-| `CountMismatch { line, column, line_text, which, declared, actual }` | The actual count of vertices (`which: Vertices`) or edges (`which: Edges`) disagrees with the declared count. `line` and `column` point to the header for M, or to the over-counting `v`/`e` line for N. |
+| `CountMismatch { line, column, line_text, which, declared, actual }` | The actual count of vertices (`which: Vertices`) or edges (`which: Edges`) disagrees with the declared count. `line` and `column` point to the header when the totals disagree at end of file, or to the `v`/`e` line that took the count past the declaration. |
 | `InvalidVertex { line, column, line_text, detail }` | A malformed `v` line. `detail` is one of `MissingCoordinate { axis }`, `NotANumber { token, axis }`, or `NotFinite { token, axis }` (a coordinate that parses as a `float` but is `±inf` or `nan`; see §6.3). |
 | `InvalidEdge { line, column, line_text, detail }` | A malformed `e` line. `detail` is one of `MissingIndex { which }`, `NotAnIndex { token, which }`, `NegativeIndex { index, which }`, or `OutOfRange { index, vertex_count, which }`. |
 | `MissingGroupName { line, column, line_text }` | A `group` line with no name token. |
@@ -601,7 +604,9 @@ belong to.
 
 ### 9.5 Examples
 
-The smallest valid canonical file (the empty model):
+The smallest valid canonical file (the empty model). The two blank-line
+separators of §9.1 are still emitted — the vertex and edge blocks are
+empty — so the byte sequence ends with `edges 0` followed by three LFs:
 
 ```text
 wrfm 2
@@ -614,11 +619,10 @@ A tetrahedron (§A.1).
 wrfm 2
 vertices 4   edges 6
 
-# Name: Regular Tetrahedron
-v 1.0 1.0 1.0
-v 1.0 -1.0 -1.0
-v -1.0 1.0 -1.0
-v -1.0 -1.0 1.0
+v 1 1 1
+v 1 -1 -1
+v -1 1 -1
+v -1 -1 1
 
 e 0 1
 e 0 2
@@ -628,9 +632,11 @@ e 2 3
 e 3 1
 ```
 
-Note: the trailing comment line `# Name: ...` is preserved by readers
-but its presence is not normative — it is a convention some sample files
-carry.
+Note: sample files such as `wrfm_files/tetrahedron.wrfm` write the same
+coordinates as `1.0`-style decimals and carry a `# Name: ...` comment
+line. Readers accept both (§8, §9.4), but a conforming writer normalizes
+them away: `1.0` round-trips as `1` (§9.4), and comments are not model
+data, so they are dropped on output rather than preserved.
 
 ## 10. Reserved for future versions
 
@@ -703,10 +709,10 @@ wireforge tools interpret a file once parsed.
 wrfm 2
 vertices 4   edges 6
 
-v 1.0 1.0 1.0
-v 1.0 -1.0 -1.0
-v -1.0 1.0 -1.0
-v -1.0 -1.0 1.0
+v 1 1 1
+v 1 -1 -1
+v -1 1 -1
+v -1 -1 1
 
 e 0 1
 e 0 2

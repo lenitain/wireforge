@@ -2064,8 +2064,8 @@ fn format_teaches_group_semantics() {
     let out = run(&["format"]);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let so = stdout(&out);
-    // The "groups re-list global vertices; indexing never restarts" rule.
-    assert!(so.contains("RE-LIST"), "stdout:\n{so}");
+    // The "group v lines ARE the global vertices; indexing never restarts" rule.
+    assert!(so.contains("ARE the global vertices"), "stdout:\n{so}");
     assert!(so.contains("NEVER restarts"), "stdout:\n{so}");
     // The complete group example.
     assert!(so.contains("group body"), "stdout:\n{so}");
@@ -3265,18 +3265,27 @@ fn fmt_nonexistent_file_exits_three() {
 }
 
 #[test]
-fn fmt_broken_model_exits_two_overriding_check() {
-    // The BROKEN fixture is canonical except for the `e 0 0` zero-length
-    // edge; `--check` would compute a match, but the higher-severity L2
-    // verdict (broken) wins on the exit code, mirroring the CLI's four-tier
-    // contract. Without --check the same exit-code rule applies.
+fn fmt_broken_model_carries_no_health_tier() {
+    // The BROKEN fixture has a zero-length `e 0 0` edge, so `wrfm check`
+    // reports `broken` for it — but `fmt` reports the SURFACE and nothing
+    // else (like `cargo fmt`). Its surface is not canonical (no blank line
+    // before the edge block), so `--check` says 1 for the bytes — never 2
+    // for the broken geometry — and plain `fmt` emits the canonical form
+    // and exits 0.
     let dir = scratch("fmt_broken");
     let path = write(&dir, "broken.wrfm", BROKEN);
     let out = run(&["fmt", "--check", path.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
-    let out = run(&["fmt", path.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let canon = run(&["fmt", path.to_str().unwrap()]);
+    assert_eq!(canon.status.code(), Some(0), "stderr: {}", stderr(&canon));
+    // The canonical emission of the same broken model is a clean surface:
+    // the model is still `broken`, yet `--check` stays at 0.
+    let dir2 = scratch("fmt_broken_canon");
+    let path2 = write(&dir2, "broken.wrfm", &stdout(&canon));
+    let out2 = run(&["fmt", "--check", path2.to_str().unwrap()]);
+    assert_eq!(out2.status.code(), Some(0), "stderr: {}", stderr(&out2));
     fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&dir2).ok();
 }
 
 #[test]

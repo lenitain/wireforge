@@ -2011,8 +2011,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (current_model, model_name) = if blank {
         // No FILE on a terminal: nothing to read, nothing to open. The
-        // viewer starts on an empty canvas — Row 0 says "no file" — and every
-        // key keeps working; there is no model to rotate.
+        // viewer starts on an empty canvas — the statusline's pill says
+        // "no file" — and every key keeps working; there is no model to
+        // rotate.
         (Model::default(), "no file".to_string())
     } else if is_stream {
         // Stream path: read all of stdin (or the FIFO) once, probe the

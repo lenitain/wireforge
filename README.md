@@ -5,7 +5,8 @@
 Wireforge is a TUI viewer for 3D wireframe models. Point it at a `.wrfm` file
 and turn the model around with the keyboard. The repository also holds the
 `.wrfm` file format, a Rust library that reads and writes it, and a `wrfm`
-command line tool that converts, checks and edits models.
+command line tool that validates, inspects, transforms, edits and renders
+models over plain stdio.
 
 ![Wireforge viewing a braille-rendered Utah teapot](assets/wireforge.png)
 
@@ -30,9 +31,9 @@ The repository holds the viewer and the pieces around it:
   serializes that format, with `no_std` support and exact `f64` round-trips.
   The viewer and the CLI read models through it.
 - **[`wrfm` CLI](crates/wrfm-cli)** — the command line tool, installed as
-  `wrfm` from the `wrfm-cli` package. It has thirteen subcommands that check,
-  verify, inspect, query, transform, edit, render, convert and diff models
-  over plain stdio. The viewer does not need it.
+  `wrfm` from the `wrfm-cli` package. It has fourteen subcommands that
+  check, verify, inspect, query, view, render, transform, edit, convert,
+  reformat and diff models over plain stdio. The viewer does not need it.
 - **[`wrfm-raster`](crates/wrfm-raster)** — the shared renderer: camera
   projection and braille rasterization used by the viewer and the CLI,
   byte-identical to ratatui's canvas.
@@ -45,7 +46,7 @@ The repository holds the viewer and the pieces around it:
   line-and-column report on stderr.
 - **Keyboard control.** Rotate, pan and zoom with `hjkl`, the arrow
   keys, `d`/`f` and `=`/`-`. `Ctrl` turns the model around its own axes instead
-  of the world's, and `c` resets the view to the file's own framing. A telemetry
+  of the world's, and `r` resets the view to the file's own framing. A telemetry
   line reports the camera, a statusline strip names the model and carries the
   everyday keys, and `?` opens a grouped reference to every binding.
 - **Everything is a pipe.** The viewer reads stdin (`wireforge -`) and the CLI
@@ -83,8 +84,11 @@ through installation, the viewer, its key bindings, and the format itself.
 [crates/wrfm-cli/README.md](crates/wrfm-cli/README.md) — the complete CLI
 reference, covering every subcommand, recipe, and exit-code contract.
 
-[crates/wrfm/README.md](crates/wrfm/README.md) — using the parser library and
-the authoritative prose specification of the format.
+[crates/wrfm/README.md](crates/wrfm/README.md) — using the parser library.
+
+[crates/wrfm/docs/wrfm-spec.md](crates/wrfm/docs/wrfm-spec.md) — the
+authoritative v2 specification (EBNF grammar, error variants, canonical form,
+BOM and whitespace rules, parser behaviour).
 
 [crates/wrfm-raster/README.md](crates/wrfm-raster/README.md) — the shared
 camera projection and braille rasterization API.

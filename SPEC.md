@@ -137,53 +137,53 @@ reading.
 Left and right read as you see them: the model faces out of the screen, so
 `h` sweeps its nose toward your left.
 
-| Key                       | Action                              |
-| :------------------------ | :---------------------------------- |
-| `h` / `Left`              | yaw left                            |
-| `l` / `Right`             | yaw right                           |
-| `k` / `Up`                | pitch up                            |
-| `j` / `Down`              | pitch down                          |
-| `d`                       | roll anticlockwise                  |
-| `f`                       | roll clockwise                      |
+| Key           | Action             |
+| :------------ | :----------------- |
+| `h` / `Left`  | yaw left           |
+| `l` / `Right` | yaw right          |
+| `k` / `Up`    | pitch up           |
+| `j` / `Down`  | pitch down         |
+| `d`           | roll anticlockwise |
+| `f`           | roll clockwise     |
 
 #### Move — the world's plane
 
-| Key                            | Action                              |
-| :----------------------------- | :---------------------------------- |
-| `Shift+h` / `Shift+Left`       | pan left                            |
-| `Shift+l` / `Shift+Right`      | pan right                           |
-| `Shift+k` / `Shift+Up`         | pan up                              |
-| `Shift+j` / `Shift+Down`       | pan down                            |
-| `=` / `+`                      | dolly nearer                        |
-| `-` / `_`                      | dolly farther                       |
+| Key                       | Action        |
+| :------------------------ | :------------ |
+| `Shift+h` / `Shift+Left`  | pan left      |
+| `Shift+l` / `Shift+Right` | pan right     |
+| `Shift+k` / `Shift+Up`    | pan up        |
+| `Shift+j` / `Shift+Down`  | pan down      |
+| `=` / `+`                 | dolly nearer  |
+| `-` / `_`                 | dolly farther |
 
 #### Rotate — the model's own axes
 
-Same turns, but around the model's own frame: `Ctrl+h` yaws it to *its* left.
+Same turns, but around the model's own frame: `Ctrl+h` yaws it to _its_ left.
 
-| Key                              | Action                              |
-| :------------------------------- | :---------------------------------- |
-| `Ctrl+h` / `Ctrl+Left`           | yaw left                            |
-| `Ctrl+l` / `Ctrl+Right`          | yaw right                           |
-| `Ctrl+k` / `Ctrl+Up`             | pitch up                            |
-| `Ctrl+j` / `Ctrl+Down`           | pitch down                          |
-| `Ctrl+d`                         | roll anticlockwise                  |
-| `Ctrl+f`                         | roll clockwise                      |
+| Key                     | Action             |
+| :---------------------- | :----------------- |
+| `Ctrl+h` / `Ctrl+Left`  | yaw left           |
+| `Ctrl+l` / `Ctrl+Right` | yaw right          |
+| `Ctrl+k` / `Ctrl+Up`    | pitch up           |
+| `Ctrl+j` / `Ctrl+Down`  | pitch down         |
+| `Ctrl+d`                | roll anticlockwise |
+| `Ctrl+f`                | roll clockwise     |
 
 #### Frame — where the model sits on screen
 
-| Key        | Action                              |
-| :--------- | :---------------------------------- |
-| `r`        | reset the view                      |
+| Key | Action         |
+| :-- | :------------- |
+| `r` | reset the view |
 
 #### Session
 
-| Key                       | Action                              |
-| :------------------------ | :---------------------------------- |
-| `Space`                   | toggle spinning                     |
-| `Tab` / `Shift+Tab`       | toggle the axes                     |
-| `?`                       | toggle this help                    |
-| `q` / `Esc` / `Ctrl+c`    | quit                                |
+| Key                    | Action           |
+| :--------------------- | :--------------- |
+| `Space`                | toggle spinning  |
+| `Tab` / `Shift+Tab`    | toggle the axes  |
+| `?`                    | toggle this help |
+| `q` / `Esc` / `Ctrl+c` | quit             |
 
 The help overlay lists every binding, grouped the same way.
 
@@ -222,6 +222,7 @@ e 2 3
 e 3 1
 ```
 
-The authoritative prose specification lives with the library in
-[crates/wrfm/README.md](crates/wrfm/README.md). It covers BOM and whitespace
-rules, the `f64` round-trip guarantee, and the parser's error behaviour.
+The authoritative prose specification lives at
+[crates/wrfm/docs/wrfm-spec.md](crates/wrfm/docs/wrfm-spec.md). It covers BOM
+and whitespace rules, the `f64` round-trip guarantee, the parser's error
+behaviour, and the canonical form.

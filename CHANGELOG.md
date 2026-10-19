@@ -1,158 +1,169 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to `wireforge` (the root package) and to workspace-wide
+history are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and `wireforge` adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Every crate keeps its own release axis and its own changelog; entries below are
+the ones this package or the shared workspace experienced:
+
+- [wrfm](crates/wrfm/CHANGELOG.md)
+- [wrfm-cli](crates/wrfm-cli/CHANGELOG.md)
+- [wrfm-raster](crates/wrfm-raster/CHANGELOG.md)
+
+Tags `v0.5.0`–`v0.8.0` mark `wireforge` releases; the crate-level axes are
+untagged. Every version heading below is the version the root `Cargo.toml`
+carried in git on that date.
 
 ## [Unreleased]
 
 ### Added
 
 - The viewer opens with an empty canvas when no `FILE` is given.
-- A lualine-style statusline in the viewer.
+- A lualine-style statusline in the viewer, with the hints trimmed to `?` and
+  `q`.
 - `R` resets the view in the viewer.
-- Vertical FOV is a renderer parameter, defaulting to 1.0 rad. **Breaking** for
-  anyone reading the renderer internals.
 - Example asset `utah-teapot.wrfm`.
-- `wrfm fmt <FILE>` re-emits a `.wrfm` file in canonical v2 surface form
-  (shortest round-trip coordinates, single blank separators, BOM stripped,
-  CRLF→LF). `--check` exits 1 if re-canonicalization would change bytes
-  (mirrors `cargo fmt --check`); `-q` silences stdout. Decorative `#`
-  comments are dropped in this version — preservation is a planned
-  addition.
-- `wrfm` parser rejects non-finite (`±inf`, `NaN`) vertex coordinates with the
-  new `NotFinite` error variant.
-- Fixture-driven parser tests in `crates/wrfm/tests/fixtures/` — 44 `.wrfm`
-  files plus a single manifest of expected outcomes; `.gitattributes` pins the
-  CRLF fixture as `binary` so `core.autocrlf=input` does not mangle it.
 
 ### Changed
 
+- Vertical FOV is a renderer parameter in radians (`vfov`), defaulting to 0.5.
 - `d`/`f` roll the model instead of rotating the camera. **Breaking.**
-- `Viewport` folds the former `grid` and `window` into one. **Breaking.**
-- The authoritative `.wrfm` v2 format spec lives at
-  `crates/wrfm/docs/wrfm-spec.md`. The root `SPEC.md`, `crates/wrfm/README.md`,
-  and the CLI's inline `FORMAT_SPEC` are pointers now. **Breaking** for any
-  downstream doc that scraped the old locations.
+- Pan and dolly speed are pinned to the initial distance (they close in 5 s at
+  the initial pose), and the fit margin is tightened (2.0 → 0.7), putting the
+  model at ~71% of canvas height.
 
 ### Fixed
 
 - HUD draws the model around the help panel.
 - Segments are clipped at the near plane.
-- Tarjan bridge walk runs on an explicit stack.
-- `d`/`f` roll the right way round. **Breaking** for anyone who relied on the old
-  sign.
 - Camera roll drawing is restored after the near-plane refactor.
-- Help panel no longer clips on narrow terminals.
+- `d`/`f` roll the right way round. **Breaking** for anyone who relied on the
+  old sign.
+- The help panel no longer clips on narrow terminals.
 
 ### Performance
 
-- `wrfm` parses with one token buffer, reserves model vectors from header counts,
-  and stores edge lines as spans rather than string copies.
-- `render` fuses the `f32` projection pass, refills buffers lazily, reuses the
-  parallel scratch grids instead of reallocating, and clips segments at the near
-  plane.
-- `viewer` reads the model file once and probes only its head; caches the model
-  extent and sizes the raster canvas only on `Resize`.
-- `check` indexes edges once and detects redundant / dangling edges in a single
-  pass.
-- `cli` looks up symmetry by position and clips the view sampler to its grid.
+- The viewer reads the model file once and probes only its head, caches the
+  model extent, and sizes the raster canvas only on `Resize`.
+- Per-frame heap allocations in labels and telemetry are gone.
+- The `f32` projection pass is fused, buffers refill lazily, and the parallel
+  scratch grids are reused.
 
 ### Refactor
 
-- Drop `#[allow(dead_code)]` from test-only render accessors.
-- Viewer render tests pin `vfov = 1.0`, decoupling the projection-coord
-  assertions from `DEFAULT_VFOV` drift.
-- Duplicated fit-content and vfov tests removed from
-  `crates/wrfm-cli/src/render.rs` and `crates/wrfm-cli/tests/cli.rs`; the
-  remaining `cli.rs` tests cover the same behaviour.
+- The viewer replaces `clap` with a hand-rolled argument parser.
+- Test-only render accessors drop `#[allow(dead_code)]`.
+
+### Build
+
+- The changelog is maintained by hand again; the changelog bot workflow is
+  gone.
 
 ## [0.8.0] - 2026-10-09
 
-`.wrfm` v2, a workspace split, and a viewer rewrite. Several public surfaces
-moved, narrowed, or disappeared — see the **Breaking** notes throughout.
-
 ### Added
 
-- `.wrfm` v2 format — magic line, counts header, groups, structured errors.
-  **Breaking.**
-- `wrfm-cli` gains `obj → wrfm` conversion and auto-detects the convert input
-  format from content. **Breaking** for the input-format calls.
-- `cli` narrows degree-2 health to collinear midpoints. **Breaking.**
-- Viewer reads stdin when `FILE` is omitted.
-- Viewer gains layout-independent chord keys (`wsad`-style).
-- `wireforge` replaces the `x` reload panel with a one-line status row.
+- The viewer reads stdin when `FILE` is omitted.
+- Layout-independent chord keys (`wsad`-style).
 
 ### Changed
 
-- Repo is now a Cargo workspace with a shared `wrfm-raster` renderer.
-  **Breaking.**
-- `wrfm` lib split into `model`, `parse`, `error`, `tests` modules.
-- `wrfm` drops `parse_with` strict mode. **Breaking.**
-- The wireforge model is owned locally; `ratatui-wireframe` is gone.
-  **Breaking.**
-- `wrfm-cli` unifies the rules and adds `--weld` and `--fit` content.
-- Viewer drops the OBJ / `ratty` rendering path. **Breaking.**
-- Viewer unifies direction signs — body-frame keys, object-side views, yaw sign.
-  **Breaking.**
-- Viewer reads plain keys in the viewer's frame. **Breaking.**
+- The model format is now `.wrfm` v2 — magic line, counts header, groups, and
+  structured errors. **Breaking.**
+- The repo is a Cargo workspace; the shared renderer is extracted as
+  `wrfm-raster`.
+- The viewer owns its model type; the `ratatui-wireframe` dependency is gone.
+- The `x` reload panel becomes a one-line status row.
+- The viewer drops the OBJ / `ratty` rendering path. **Breaking.**
+- Viewer direction signs are unified — body-frame keys, object-side views, yaw
+  sign. **Breaking.**
+- The viewer reads plain keys in the viewer's frame. **Breaking.**
 
 ### Removed
 
-- File hot-reload and the `inotify` dependency from `wireforge`. **Breaking.**
+- File hot-reload and the `inotify` dependency. **Breaking.**
 
 ### Fixed
 
-- Input unifies key handling and fixes stuck holds.
-- Input regressions from the kitty keyboard protocol.
-- Viewer points the OBJ hint at `wrfm convert <file>`.
-- Timer fires due timers on the idle event path.
-- Pre-commit hooks check and format every crate in the workspace.
-- Workspace pins the `wrfm-raster` version for publishing.
+- Input handling is unified, and stuck holds are fixed.
+- Regressions from the kitty keyboard protocol are fixed.
+- The timer fires due timers on the idle event path.
+- The OBJ hint points at `wrfm convert <file>`.
 
-### Performance
+### Build
 
-- Build the binary with radical options.
+- Pre-commit hooks run `cargo fmt` / `clippy` per crate and check every crate in
+  the workspace.
+- The `wrfm-raster` version is pinned for publishing.
+- The release profile builds with fat LTO, one codegen unit, `panic = "abort"`,
+  and stripped symbols.
 
 ## [0.7.0] - 2026-08-19
 
 ### Added
 
-- `wrfm-cli` — streaming `check`, `info`, `group`, `geometry`, `query`, `view`,
-  `render`, `transform`, `edit`, `diff` tool.
-- `.wrfm` v1 format — magic line, counts header, groups, structured errors.
-- `wireforge` gets a 6-DOF camera, HUD, stream input, and an event-driven render
-  loop.
+- A 6-DOF camera, HUD, stream input, and an event-driven render loop.
+- `wrfm-cli` — a streaming `check` / `info` / `group` / `geometry` / `query` /
+  `view` / `render` / `transform` / `edit` / `diff` tool — joins the repo.
 
 ### Changed
 
-- Projection / bounds run on parallel iterators, timer extraction, and motion is
-  unified in one module.
+- Models are `.wrfm` v1 — magic line, counts header, groups, structured errors.
+  **Breaking.**
 
 ### Fixed
 
-- HUD help overlay arrows revert to ASCII for terminal compatibility.
+- The HUD help overlay arrows revert to ASCII for terminal compatibility.
+
+### Performance
+
+- Projection and bounds run on parallel iterators; the timer is its own module;
+  motion is unified.
 
 ## [0.6.0] - 2026-06-13
 
 ### Added
 
-- 3D object viewing through `wrgp`.
+- 3D object viewing via the `ratty` feature (`ratatui-ratty`), with bundled OBJ
+  models (`model.obj`, `mouse.obj`).
 
 ## [0.5.0] - 2026-06-01
 
-### Added
+### Changed
 
-- `wrfm` crate with `no_std` support and a `read_from_string` entry point.
-- Initial commit of the wireforge project.
-- First cut of the viewer.
-- CI on GitHub Actions for the workspace.
+- The `wrfm` dependency gains `no_std` support (ships as `wrfm` 0.4.0).
+
+## [0.4.0] - 2026-05-28
 
 ### Changed
 
-- File extension renamed `wfrm` → `wrfm` across the workspace.
+- The model file extension is renamed `wfrm` → `wrfm`. **Breaking.**
 
 ### Build
 
 - `LICENSE` and crate metadata added for publishing.
+
+## [0.3.0] - 2026-05-27
+
+### Added
+
+- The viewer renders `wrfm` models in the terminal, with file hot-reload.
+
+### Build
+
+- CI on GitHub Actions.
+
+## [0.1.0] - 2026-05-27
+
+### Added
+
+- Initial commit.
+
+[Unreleased]: https://github.com/lenitain/wireforge/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/lenitain/wireforge/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/lenitain/wireforge/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/lenitain/wireforge/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/lenitain/wireforge/releases/tag/v0.5.0

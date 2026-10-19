@@ -44,6 +44,10 @@ let lines = dots_to_lines(&dots, cw, ch);
 Rayon parallelism, the TUI's screen diff, `wrfm-cli`'s ASCII / density output.
 Callers wrap `project_into` / `rasterize_line` in their own parallel loops.
 
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md) — release history for this crate.
+
 ## License
 
 MIT.

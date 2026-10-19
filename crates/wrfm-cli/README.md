@@ -319,6 +319,10 @@ wrfm check model.wrfm; echo "exit $?"
 # exit 3          # could not even read/parse/understand the request
 ```
 
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md) — release history for this crate.
+
 ## License
 
 MIT.

@@ -93,7 +93,10 @@ BOM and whitespace rules, parser behaviour).
 [crates/wrfm-raster/README.md](crates/wrfm-raster/README.md) — the shared
 camera projection and braille rasterization API.
 
-[CHANGELOG.md](CHANGELOG.md) — release history.
+Release history: [wireforge](CHANGELOG.md), [wrfm](crates/wrfm/CHANGELOG.md),
+[wrfm-cli](crates/wrfm-cli/CHANGELOG.md),
+[wrfm-raster](crates/wrfm-raster/CHANGELOG.md) — one changelog per crate, each
+on its own release axis.
 
 ## License
 

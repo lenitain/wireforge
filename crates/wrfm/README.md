@@ -147,3 +147,7 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 ```
+
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md) — release history for this crate.

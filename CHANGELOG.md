@@ -19,6 +19,56 @@ carried in git on that date.
 
 ## [Unreleased]
 
+### Added
+
+- An `Esc` menu hub with Key Bindings, About and Exit, plus an About panel.
+  Panels opened from the menu return there on `Esc`; `q` and `Ctrl+C` quit from
+  anywhere.
+- One bar under the model, laid out like a powerline statusline: the model's
+  name in an accent pill, the state lamps in a block of their own, and the
+  camera readout in degrees, zoom multiples and model units.
+- A generated help panel: the page is built from the binding table, so a
+  rebind, a new action or a reworded description is one edit.
+
+### Changed
+
+- The bar carries no key hints: the menu's Key Bindings is the only place the
+  chords are listed. On a narrow row the lamps go first, then the readout sheds
+  from the right.
+- The bar's blocks are joined by the powerline separators (U+E0B0 and U+E0B1):
+  the name pill tapers into the state lamps and those into the bar, the way
+  lualine's sections do. The bar asks for a powerline (Nerd Font) terminal
+  font.
+- `Esc` now opens the menu (and closes or returns from its panels) instead of
+  quitting; `q` and `Ctrl+C` quit from anywhere. `?` is unbound now that Key
+  Bindings lives in the menu.
+- `+` is the primary zoom-in chord (with `=` as the alias), and `-`/`_` zoom
+  out.
+- The telemetry labels on the bar (`yaw`, `pitch`, `roll`, `zoom`, `pan`) use a
+  bright palette slot instead of the muted one, so the readout scans at a
+  glance.
+- The camera readout is a row of fixed columns: a value that grows (a minus
+  sign, another digit) takes the room to its right, so the labels hold their
+  places and the bar does not jump under the reader's feet. A value that
+  outgrows its column is cut and marked with `…`.
+- The key panel is laid out as one grid: a chord gutter measured over the whole
+  table, group headings cut to their column's width as rules, and the frame
+  named in the rotation headings (`ROTATE · world axes` / `· model axes`).
+- The overlay panels (menu, Key Bindings, About) paint no ground of their own:
+  they carry the terminal's own background, the one the transparent canvas
+  shows, so panel and 3D space read as one surface. The menu's cursor is the
+  `▸` marker and the accent ink instead of a selected band.
+
+### Fixed
+
+- On a terminal that cannot report key-up, a tap is one finite step instead of
+  a one-second drift; holds only start when key-up is actually reported.
+- `Ctrl+Shift+C` no longer quits (it is a terminal copy shortcut); `Ctrl+C`
+  still quits.
+- The key panel's right column starts at the same offset on every row: the
+  offset was measured in bytes while the chords carry arrows, so every row
+  holding an arrow shifted its right half two cells to the left.
+
 ## [0.9.0] - 2026-10-19
 
 ### Added
@@ -27,7 +77,7 @@ carried in git on that date.
 - A lualine-style statusline in the viewer, with the hints trimmed to `?` and
   `q`.
 - `r` resets the view in the viewer.
-- Example asset `utah-teapot.wrfm`.
+- Example model `wrfm_files/utah-teapot.wrfm`.
 
 ### Changed
 

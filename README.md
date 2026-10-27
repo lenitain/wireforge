@@ -44,11 +44,17 @@ The repository holds the viewer and the pieces around it:
   name: a model in a `.txt` opens as a model, OBJ content is rejected with a
   hint to run `wrfm convert`, and a broken model fails with the parser's
   line-and-column report on stderr.
-- **Keyboard control.** Rotate, pan and zoom with `hjkl`, the arrow
-  keys, `d`/`f` and `=`/`-`. `Ctrl` turns the model around its own axes instead
-  of the world's, and `r` resets the view to the file's own framing. A telemetry
-  line reports the camera, a statusline strip names the model and carries the
-  everyday keys, and `?` opens a grouped reference to every binding.
+- **Keyboard control.** Rotate, pan and zoom with `hjkl`, the arrow keys,
+  `d`/`f` and `+`/`-`; `Ctrl+hjkl`, `Ctrl+arrows` and `Ctrl+d`/`Ctrl+f` turn the
+  model around its own axes instead of the world's. `r` resets the view and
+  `Space` spins the model. `Esc` opens a menu with Key Bindings, About and Exit;
+  Key Bindings is the only way into the key reference — the bar carries no key
+  hints. One bar under the model names the file in an accent pill, carries the
+  state lamps and reports the camera in degrees, zoom multiples and model
+  units. The reference is generated from the key table and checked against it,
+  so a rebind cannot leave it behind. The bar is laid out like a powerline
+  statusline — its blocks are joined by the wedges lualine draws (U+E0B0 and
+  U+E0B1) — while the panels stay on stock glyphs.
 - **Everything is a pipe.** The viewer reads stdin (`wireforge -`) and the CLI
   writes nothing to disk, so commands chain with pipes:
 
@@ -61,9 +67,16 @@ The repository holds the viewer and the pieces around it:
   no GPU, no GUI toolkit, and no display server. The event loop sleeps when
   nothing changes and redraws at full speed while you animate. Projection and
   rasterization switch to parallel (rayon) paths on large models.
-- **Built for scripts.** Data goes to stdout, diagnostics go to stderr, and the
-  exit code tells you how things are: ok, warn, broken, or no result at all. A
-  CI job can assert on a model the same way it asserts on a test suite.
+- **Built for scripts.** The CLI writes its result to stdout and its
+  diagnostics to stderr, and its exit code says how things are: ok, warn,
+  broken, or no result at all. A CI job can assert on a model the same way it
+  asserts on a test suite.
+
+## The Esc menu
+
+Press `Esc` for the hub: Key Bindings, About and Exit. `j`/`k` or the arrow
+keys move, `Enter` selects, and `Esc` closes. Panels opened from the menu return
+there on `Esc`; `q` and `Ctrl+C` quit from anywhere.
 
 ## Getting started
 

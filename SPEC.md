@@ -48,7 +48,7 @@ editing it.
 
 Run `wireforge` with no file at all and it opens the viewer with an empty
 model: the XYZ axes are drawn at the origin, so rotating, panning and zooming
-still work, and the statusline's pill reads `no file`.
+still work, and the bar's pill reads `no file`.
 A menu entry or launcher gets the same empty canvas if it runs the viewer in a
 terminal and gives it nothing on stdin. If stdin is piped or redirected, a
 bare `wireforge` reads the stream as a model instead
@@ -60,22 +60,35 @@ wireforge
 
 ### The screen
 
-Three regions, top to bottom. Row 0 is the camera's telemetry: yaw, pitch,
-roll, distance and pan, and nothing else — the model's name is not repeated
-there. The middle is the model itself. The last row is a statusline strip,
-which is where that name lives:
+Two regions, top to bottom: the model, and one bar under it. The bar is laid
+out like a powerline statusline: the model's name in an accent pill on the
+left, two state lamps in a lighter block beside it (one dot per lamp: it lights
+in the accent when on and goes deep when off), and the camera telemetry
+right-aligned on the bar's own ground — yaw, pitch and roll in degrees, zoom as
+a multiple of the start-up framing, and pan in model units. The telemetry is a
+row of fixed columns, each label and its value in a column of its own, so a
+value that grows (a minus sign, another digit) takes the room to its right and
+the labels hold their places. Every block is closed by a wedge in its own
+ground, so the pill's colour tapers into the lamps and the lamps into the bar,
+and the two lamps of one block are divided by a thin seam:
 
 ```text
- model.wrfm ▶ ● SPIN  ● AXES ▶        ◀ ? help  q quit
+ utah-teapot ▶ ○ SPIN › ● AXES ▶           yaw 107°    pitch 26°     roll 0°      zoom 1.04×      pan 0.00, 0.00
 ```
 
-The name sits on the accent colour, the two lamps report whether the model is
-spinning and whether the axes are drawn (a lit dot means on), and the
-right-hand hints carry the everyday chords. The strip fills the row edge to
-edge, and the pill yields at most half of it so a long name can never crowd
-out the rest. When the terminal is too narrow for all of it, the hints are
-shed first, then the lamps are dropped, then the name is shortened with `…`.
-`?` always opens the full list.
+The bar fills the row edge to edge, framing the model canvas above it. The
+name pill yields at most half the row and marks a cut name with `…`. When the
+terminal is too narrow, the lamps go first (the axes lamp before the spin
+lamp), then the telemetry sheds from the right (pan first); a row too tight for
+the pill's wedge keeps the name and drops the wedge. The bar carries no
+key hints: the menu's Key Bindings always has the full list. The wedges and the
+seam are powerline glyphs (U+E0B0 and U+E0B1, drawn as `▶` and `›` above) —
+the separators lualine and powerline prompts draw — so the bar asks for a
+powerline (Nerd Font) terminal font.
+
+`Esc` opens the menu hub: **Key Bindings**, **About** and **Exit**. The help
+panel is generated from the same binding table the keyboard uses, so the two
+cannot drift apart; see [Menu](#menu).
 
 ### Stream input
 
@@ -123,15 +136,15 @@ wireforge model.wrfm --vfov 2.0   # wide: zooms in
 ### Key bindings
 
 Bindings are grouped by what you are doing, not by which modifier you hold.
-Chords are spelled `Ctrl+Shift+Key`; the arrow keys work wherever `hjkl` do.
+Chords are spelled with modifiers in `Ctrl+Shift+` order; the arrow keys
+work wherever `hjkl` do.
 
-The bindings are declared once, in one table in the source. The viewer's key
-lookup is generated from that table by the compiler, and the statusline hints
-read it directly — so a rebind moves the keyboard and the hints together. The
-help overlay is not generated: it is written out by hand, and a test checks
-every binding's chord in the table against that page, so the two cannot drift
-apart without the suite failing. The tables below are that same list written
-out for reading.
+The bindings are declared once, in one table in the source. The keyboard
+resolver reads that table and the help panel is generated from it, and a test
+keeps each help row's first key on the chord that actually fires — so a rebind
+forces the help page to follow. The bar carries no hints: the menu's Key
+Bindings is the only place the viewer lists the chords. The tables below are
+that same list written out for reading.
 
 #### Rotate — the world's axes
 
@@ -147,20 +160,11 @@ Left and right read as you see them: the model faces out of the screen, so
 | `d`           | roll anticlockwise |
 | `f`           | roll clockwise     |
 
-#### Move — the world's plane
-
-| Key                       | Action        |
-| :------------------------ | :------------ |
-| `Shift+h` / `Shift+Left`  | pan left      |
-| `Shift+l` / `Shift+Right` | pan right     |
-| `Shift+k` / `Shift+Up`    | pan up        |
-| `Shift+j` / `Shift+Down`  | pan down      |
-| `=` / `+`                 | dolly nearer  |
-| `-` / `_`                 | dolly farther |
-
 #### Rotate — the model's own axes
 
-Same turns, but around the model's own frame: `Ctrl+h` yaws it to _its_ left.
+The same turns, but around the model's own current axes: `Ctrl+h` yaws it to
+_its_ left. Unlike the world keys, the axis rides with the model, so the
+control feels like a trackball rather than a turntable.
 
 | Key                     | Action             |
 | :---------------------- | :----------------- |
@@ -171,22 +175,41 @@ Same turns, but around the model's own frame: `Ctrl+h` yaws it to _its_ left.
 | `Ctrl+d`                | roll anticlockwise |
 | `Ctrl+f`                | roll clockwise     |
 
-#### Frame — where the model sits on screen
+#### Move — the world's plane
 
-| Key | Action         |
-| :-- | :------------- |
-| `r` | reset the view |
+| Key                       | Action        |
+| :------------------------ | :------------ |
+| `Shift+h` / `Shift+Left`  | pan left      |
+| `Shift+l` / `Shift+Right` | pan right     |
+| `Shift+k` / `Shift+Up`    | pan up        |
+| `Shift+j` / `Shift+Down`  | pan down      |
+| `+` / `=`                 | zoom in       |
+| `-` / `_`                 | zoom out      |
+
+#### View — where the model sits on screen
+
+| Key     | Action          |
+| :------ | :-------------- |
+| `r`     | reset the view  |
+| `Space` | toggle spinning |
+| `Tab`   | toggle the axes |
 
 #### Session
 
-| Key                               | Action           |
-| :-------------------------------- | :--------------- |
-| `Space`                           | toggle spinning  |
-| `Tab` / `Shift+Tab`               | toggle the axes  |
-| `?`                               | toggle this help |
-| `q` / `Esc` / `Ctrl+c` / `Ctrl+q` | quit             |
+| Key            | Action           |
+| :------------- | :--------------- |
+| `Esc`          | open the menu    |
+| `q` / `Ctrl+c` | quit             |
 
-The help overlay lists every binding, grouped the same way.
+#### Menu
+
+`Esc` opens the hub: **Key Bindings**, **About** and **Exit**. `j`/`k` or the
+arrow keys move, `Enter` selects, and `Esc` closes. Panels opened from the menu
+return there on `Esc`; `q` and `Ctrl+c` quit from anywhere, including the menu
+and its panels.
+
+The help panel lists every binding, grouped the same way, and is generated from
+the binding table rather than maintained by hand.
 
 ## The `.wrfm` Format
 

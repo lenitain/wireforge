@@ -134,6 +134,36 @@ fn drain_until_quiet(
     }
 }
 
+/// Answer the start-up keyboard-capability query with only primary device
+/// attributes (a legacy terminal). Returns every byte read while waiting so the
+/// test's captured stream still contains the terminal-setup bytes.
+fn answer_keyboard_query(master: &mut std::fs::File, buf: &mut [u8]) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = Vec::new();
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "app never queried keyboard support"
+        );
+        match master.read(buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                seen.extend_from_slice(&buf[..n]);
+                if seen.windows(4).any(|w| w == b"\x1b[?u") {
+                    master
+                        .write_all(b"\x1b[?1;2c")
+                        .expect("write capability reply");
+                    return seen;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => return seen,
+        }
+    }
+}
+
 /// Whether `params` (the bytes of one `ESC[…m`) leave a background colour
 /// selected. `0` resets, `49` is the default background, `40..=47` /
 /// `100..=107` pick one — Wireforge only emits a leading reset, an fg slot
@@ -218,16 +248,18 @@ fn no_file_argument_opens_the_empty_space() {
     let (mut child, mut master) = spawn_on_pty(bin, &[]);
     set_nonblock(master.as_raw_fd(), true);
     let mut buf = [0u8; 8192];
+    let mut seen = answer_keyboard_query(&mut master, &mut buf);
 
     // Read until the first frame has been written and the app goes quiet
     // (waiting for input). A quiet window, not "the first read returned
     // nothing": the terminal setup bytes arrive before the first frame does.
-    let (seen, quiet) = drain_until_quiet(
+    let (frame, quiet) = drain_until_quiet(
         &mut master,
         &mut buf,
         Instant::now() + Duration::from_secs(10),
         Duration::from_millis(600),
     );
+    seen.extend(frame);
     assert!(quiet, "a blank viewer must render and then idle");
     let text = strip_ansi(&String::from_utf8_lossy(&seen));
     eprintln!("no-args probe: {} bytes of TUI output", seen.len());
@@ -365,8 +397,6 @@ fn sigwinch_delivers_resize_event() {
     };
     drop(slave);
 
-    // Let the app fully settle, then drain until it is quiet.
-    std::thread::sleep(Duration::from_millis(2000));
     let mut buf = [0u8; 8192];
     let set_nonblock = |fd: i32, on: bool| unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -378,9 +408,11 @@ fn sigwinch_delivers_resize_event() {
         libc::fcntl(fd, libc::F_SETFL, flags);
     };
     set_nonblock(master.as_raw_fd(), true);
-    // Everything the app has written so far, frames concatenated: the SGR
-    // state a later escape runs in is the one the earlier frames left.
-    let mut stream: Vec<u8> = Vec::new();
+    // Answer the probe before its two-second timeout, then let the app settle.
+    // Everything it has written so far, frames concatenated: the SGR state a
+    // later escape runs in is the one the earlier frames left.
+    let mut stream = answer_keyboard_query(&mut master, &mut buf);
+    std::thread::sleep(Duration::from_millis(2000));
     // drain until no bytes arrive for 400 ms (app fully idle)
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut quiet = false;

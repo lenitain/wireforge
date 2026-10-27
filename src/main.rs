@@ -18,7 +18,6 @@ use ratatui::{
 };
 
 use std::{
-    collections::HashMap,
     error::Error,
     io::{self, IsTerminal, Read},
     path::{Path, PathBuf},
@@ -30,38 +29,27 @@ use wrfm::WrfmModel;
 use wrfm_raster::Model;
 use wrfm_raster::geometry::{DEFAULT_VFOV, MAX_VFOV};
 
+mod input;
+mod keymap;
+mod motion;
 mod render;
 mod timer;
 mod view;
+use input::MotionInput;
+use keymap::{Action, BINDINGS, Group, canonical_key, resolve_key_event};
+use motion::SPIN_RATE;
 use render::Ink;
 use timer::{TimerId, TimerScheduler};
 use view::ViewState;
 
-// Speed constants are dyadic fractions (exact in binary): rotation and
-// auto-spin rates are pure radians per second (parameter-free by design).
-// Translation speed is set per session from the initial camera distance
-// (`App::speed = dist_initial / 5.0`), so this unit owns only `ROT_RATE`
-// / `SPIN_RATE` — every translation step is just `speed * dt`.
-
-/// Smooth continuous rotation rate (radians per second) while a key is held.
-const ROT_RATE: f64 = 169.0 / 128.0;
-
-/// Auto-spin yaw rate (radians per second): 169/256 = 0.66015625, a dyadic (exact-in-binary) constant.
-const SPIN_RATE: f64 = 169.0 / 256.0;
 /// How often the idle loop re-checks the terminal size (resize fallback).
 const RESIZE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// A tap's rotation: 3 degrees, enough to feel like an answer without making
-/// fine alignment a chore. Terminals that cannot report key-up use this for
-/// every press and auto-repeat, so a tap is always finite; terminals with
-/// key-up also get continuous motion on top while the key is down.
-const TAP_ROT: f64 = std::f64::consts::PI / 60.0;
-/// A tap's pan, as a fraction of the session's translation speed.
-const TAP_PAN: f64 = 1.0 / 20.0;
-/// A tap's dolly, as a fraction of the session's translation speed. Zoom
-/// wants to feel more immediate than a nudge of the model, hence the larger
-/// fraction.
-const TAP_DOLLY: f64 = 1.0 / 8.0;
+/// Upper bound for one frame's simulated time. The idle wait is excluded by
+/// resetting the frame clock after the blocking receive, so this cap only
+/// guards a real stall (for example a suspend/resume); slow frames still
+/// advance at their real speed.
+const MAX_FRAME_DT: Duration = Duration::from_secs(1);
 
 /// Command-line arguments the viewer accepts: one optional positional `FILE`
 /// and `--vfov`. Parsed by hand in [`Args::parse`]; the whole surface is two
@@ -191,495 +179,6 @@ const MENU_ITEMS: &[&str] = &["Key Bindings", "About", "Exit"];
 const MENU_KEY_BINDINGS: usize = 0;
 const MENU_ABOUT: usize = 1;
 const MENU_EXIT: usize = 2;
-
-/// One continuous degree of freedom: rotation (yaw / pitch / roll) and
-/// translation (pan / dolly). Rotation comes in two frames: plain keys turn
-/// around the fixed world axes (turntable), Ctrl keys around the model's own
-/// current axes (trackball). The frame picks the axis, never the direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Motion {
-    YawLeft,
-    YawRight,
-    PitchUp,
-    PitchDown,
-    RollPlus,
-    RollMinus,
-    /// Rotation around the model's own current axes.
-    LocalYawLeft,
-    LocalYawRight,
-    LocalPitchUp,
-    LocalPitchDown,
-    LocalRollPlus,
-    LocalRollMinus,
-    MoveLeft,
-    MoveRight,
-    MoveUp,
-    MoveDown,
-    MoveForward,
-    MoveBack,
-}
-
-/// What one key press does. A `Motion` key is continuous while held on a
-/// terminal that reports key-up; a terminal that cannot report it gets one
-/// finite step per press and auto-repeat. Every other action fires once per
-/// press.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
-    Quit,
-    Menu,
-    Spin,
-    Axes,
-    Reset,
-    Motion(Motion),
-}
-
-/// The task a binding belongs to. Groups drive the help panel's two columns and
-/// keep the table readable; they are not a second source of truth.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Group {
-    Rotate,
-    Local,
-    Move,
-    View,
-    Session,
-}
-
-impl Group {
-    /// The help panel's columns, top to bottom. World and model rotation lead
-    /// the left column; the camera and session groups fill the right.
-    const COLUMNS: [&[Group]; 2] = [
-        &[Group::Rotate, Group::Local],
-        &[Group::Move, Group::View, Group::Session],
-    ];
-
-    fn title(self) -> &'static str {
-        match self {
-            Group::Rotate => "ROTATE · world axes",
-            Group::Local => "ROTATE · model axes",
-            Group::Move => "MOVE",
-            Group::View => "VIEW",
-            Group::Session => "SESSION",
-        }
-    }
-}
-
-/// Fold one terminal key event into the key's identity (its *base*, un-shifted
-/// form) plus whether SHIFT is in effect, so every later decision sees one
-/// protocol-independent shape instead of two:
-///
-/// * the kitty protocol sends the layout's **shifted glyph** for every key
-///   that has an alternate (`REPORT_ALTERNATE_KEYS` is pushed): `Shift+h` ->
-///   `Char('H')`, `Shift+-` -> `Char('_')` — crossterm applies the alternate
-///   and clears SHIFT. Keys without an alternate keep the modifier instead
-///   (`Shift+Left` -> `Left` + SHIFT, `Shift+Space` -> `Char(' ')` + SHIFT);
-/// * a legacy terminal sends the shifted **glyph** too, and crossterm
-///   additionally synthesises SHIFT for upper-case letters (`Shift+h` ->
-///   `Char('H')` + SHIFT, `Shift+/` -> `Char('?')` with NO modifier at all).
-///
-/// So an upper-case char implies shift, a known shifted glyph folds back to
-/// its base key + shift, and anything else keeps the SHIFT modifier. The glyph
-/// table maps the shifted glyphs the bindings use back to their US base keys —
-/// the layouts' own glyphs arrive unchanged, so the same table serves both
-/// paths. Caps lock therefore counts as shift on the legacy path and is a
-/// no-op under kitty (crossterm files the kitty caps-lock bit under
-/// `KeyEventState`, which is never read here) — the two cannot be told apart
-/// from here.
-const fn canonical_key(code: KeyCode, mods: KeyModifiers) -> (KeyCode, bool) {
-    use KeyCode::Char;
-    let shift = mods.contains(KeyModifiers::SHIFT);
-    // Const-evaluable throughout: this may not reach for Unicode tables
-    // (`is_uppercase`) or allocating case folding (`to_lowercase`). Every
-    // chord is ASCII.
-    match code {
-        Char(c) if c.is_ascii_uppercase() => (Char(c.to_ascii_lowercase()), true),
-        Char('?') => (Char('/'), true),
-        Char('_') => (Char('-'), true),
-        Char('+') => (Char('='), true),
-        // BackTab *is* Shift+Tab: the legacy encoding reports it as its own
-        // key with no modifier, the kitty one keeps SHIFT. Folding both
-        // spellings to the shifted form lets one chord cover them.
-        KeyCode::BackTab => (KeyCode::BackTab, true),
-        KeyCode::Tab if shift => (KeyCode::BackTab, true),
-        // Space and Esc are the two keys a terminal cannot report SHIFT for:
-        // the legacy encoding sends the same bytes either way, so treating the
-        // shifted spelling as a different key could only make the two terminal
-        // paths disagree about a key that is in fact the same one.
-        Char(' ') | KeyCode::Esc => (code, false),
-        _ => (code, shift),
-    }
-}
-
-/// One way to press a binding: the key event as the terminal reports it.
-///
-/// `code` / `mods` are the legacy (no kitty protocol) encoding, which is the
-/// more explicit of the two: a shifted letter arrives as its upper-case glyph
-/// **with** SHIFT still set, and a shifted symbol as that symbol (`?`, `+`,
-/// `_`) with no modifier. Feeding these through `canonical_key` folds them
-/// back to the documented chord, so the resolution tests can prove each
-/// binding resolves to the action it claims. The kitty encoding is covered
-/// separately by `resolve_key_event_folds_both_terminal_encodings`.
-#[derive(Clone, Copy)]
-struct Chord {
-    code: KeyCode,
-    mods: KeyModifiers,
-}
-
-/// A chord with no modifier.
-const fn key(code: KeyCode) -> Chord {
-    Chord {
-        code,
-        mods: KeyModifiers::NONE,
-    }
-}
-
-/// `Shift` + `code`.
-const fn shift(code: KeyCode) -> Chord {
-    Chord {
-        code,
-        mods: KeyModifiers::SHIFT,
-    }
-}
-
-/// `Ctrl` + `code`.
-const fn ctrl(code: KeyCode) -> Chord {
-    Chord {
-        code,
-        mods: KeyModifiers::CONTROL,
-    }
-}
-
-/// One binding: an action, the task it belongs to, the keys the help panel
-/// shows, and every way to press it.
-///
-/// `BINDINGS` is the one table the keyboard resolves against *and* the help
-/// panel is generated from, so the keyboard and the help page cannot drift
-/// apart. `keys` is display text for the help panel (`"h / ←"`); a test checks
-/// that each binding's primary chord's label appears in it, so the displayed
-/// key is at least the one that fires.
-#[derive(Clone, Copy)]
-struct Binding {
-    action: Action,
-    group: Group,
-    /// The chord column of the help panel.
-    keys: &'static str,
-    /// The verb column of the help panel.
-    doc: &'static str,
-    /// Every documented way to press it.
-    chords: &'static [Chord],
-}
-
-/// Every binding, grouped by the task it belongs to.
-const BINDINGS: &[Binding] = &[
-    // --- Rotate: the world's axes ---
-    Binding {
-        action: Action::Motion(Motion::YawLeft),
-        group: Group::Rotate,
-        keys: "h / ←",
-        doc: "yaw left",
-        chords: &[key(KeyCode::Char('h')), key(KeyCode::Left)],
-    },
-    Binding {
-        action: Action::Motion(Motion::YawRight),
-        group: Group::Rotate,
-        keys: "l / →",
-        doc: "yaw right",
-        chords: &[key(KeyCode::Char('l')), key(KeyCode::Right)],
-    },
-    Binding {
-        action: Action::Motion(Motion::PitchUp),
-        group: Group::Rotate,
-        keys: "k / ↑",
-        doc: "pitch up",
-        chords: &[key(KeyCode::Char('k')), key(KeyCode::Up)],
-    },
-    Binding {
-        action: Action::Motion(Motion::PitchDown),
-        group: Group::Rotate,
-        keys: "j / ↓",
-        doc: "pitch down",
-        chords: &[key(KeyCode::Char('j')), key(KeyCode::Down)],
-    },
-    // `d` reads left and `f` reads right, the way hjkl reads spatially: on a
-    // QWERTY home row `d` sits LEFT of `f`, so `d` rolls the image
-    // anticlockwise (its left side dips) and `f` rolls it clockwise.
-    Binding {
-        action: Action::Motion(Motion::RollMinus),
-        group: Group::Rotate,
-        keys: "d",
-        doc: "roll anticlockwise",
-        chords: &[key(KeyCode::Char('d'))],
-    },
-    Binding {
-        action: Action::Motion(Motion::RollPlus),
-        group: Group::Rotate,
-        keys: "f",
-        doc: "roll clockwise",
-        chords: &[key(KeyCode::Char('f'))],
-    },
-    // --- Rotate: the model's own axes ---
-    Binding {
-        action: Action::Motion(Motion::LocalYawLeft),
-        group: Group::Local,
-        keys: "Ctrl+h / Ctrl+←",
-        doc: "yaw left",
-        chords: &[ctrl(KeyCode::Char('h')), ctrl(KeyCode::Left)],
-    },
-    Binding {
-        action: Action::Motion(Motion::LocalYawRight),
-        group: Group::Local,
-        keys: "Ctrl+l / Ctrl+→",
-        doc: "yaw right",
-        chords: &[ctrl(KeyCode::Char('l')), ctrl(KeyCode::Right)],
-    },
-    Binding {
-        action: Action::Motion(Motion::LocalPitchUp),
-        group: Group::Local,
-        keys: "Ctrl+k / Ctrl+↑",
-        doc: "pitch up",
-        chords: &[ctrl(KeyCode::Char('k')), ctrl(KeyCode::Up)],
-    },
-    Binding {
-        action: Action::Motion(Motion::LocalPitchDown),
-        group: Group::Local,
-        keys: "Ctrl+j / Ctrl+↓",
-        doc: "pitch down",
-        chords: &[ctrl(KeyCode::Char('j')), ctrl(KeyCode::Down)],
-    },
-    Binding {
-        action: Action::Motion(Motion::LocalRollMinus),
-        group: Group::Local,
-        keys: "Ctrl+d",
-        doc: "roll anticlockwise",
-        chords: &[ctrl(KeyCode::Char('d'))],
-    },
-    Binding {
-        action: Action::Motion(Motion::LocalRollPlus),
-        group: Group::Local,
-        keys: "Ctrl+f",
-        doc: "roll clockwise",
-        chords: &[ctrl(KeyCode::Char('f'))],
-    },
-    // --- Move: slide in the world's plane, and dolly along the sight line ---
-    Binding {
-        action: Action::Motion(Motion::MoveLeft),
-        group: Group::Move,
-        keys: "Shift+h / Shift+←",
-        doc: "pan left",
-        chords: &[shift(KeyCode::Char('H')), shift(KeyCode::Left)],
-    },
-    Binding {
-        action: Action::Motion(Motion::MoveRight),
-        group: Group::Move,
-        keys: "Shift+l / Shift+→",
-        doc: "pan right",
-        chords: &[shift(KeyCode::Char('L')), shift(KeyCode::Right)],
-    },
-    Binding {
-        action: Action::Motion(Motion::MoveUp),
-        group: Group::Move,
-        keys: "Shift+k / Shift+↑",
-        doc: "pan up",
-        chords: &[shift(KeyCode::Char('K')), shift(KeyCode::Up)],
-    },
-    Binding {
-        action: Action::Motion(Motion::MoveDown),
-        group: Group::Move,
-        keys: "Shift+j / Shift+↓",
-        doc: "pan down",
-        chords: &[shift(KeyCode::Char('J')), shift(KeyCode::Down)],
-    },
-    // `+` is how several layouts spell the shifted `=`; it folds to `=`.
-    // The plain glyph leads so the help and the strip show `+`, which is what
-    // an operator actually types to zoom in.
-    Binding {
-        action: Action::Motion(Motion::MoveForward),
-        group: Group::Move,
-        keys: "+ / =",
-        doc: "zoom in",
-        chords: &[key(KeyCode::Char('+')), key(KeyCode::Char('='))],
-    },
-    Binding {
-        action: Action::Motion(Motion::MoveBack),
-        group: Group::Move,
-        keys: "- / _",
-        doc: "zoom out",
-        chords: &[key(KeyCode::Char('-')), key(KeyCode::Char('_'))],
-    },
-    // --- View: where the model sits on screen ---
-    Binding {
-        action: Action::Reset,
-        group: Group::View,
-        keys: "r",
-        doc: "reset the view",
-        chords: &[key(KeyCode::Char('r'))],
-    },
-    Binding {
-        action: Action::Spin,
-        group: Group::View,
-        keys: "Space",
-        doc: "toggle spin",
-        chords: &[key(KeyCode::Char(' '))],
-    },
-    // Tab is the one chord for the axes. A legacy terminal reports
-    // Shift+Tab as BackTab, kitty reports Tab with SHIFT; BackTab is the
-    // spelling both paths agree on.
-    Binding {
-        action: Action::Axes,
-        group: Group::View,
-        keys: "Tab",
-        doc: "toggle axes",
-        chords: &[key(KeyCode::Tab), shift(KeyCode::BackTab)],
-    },
-    // --- Session ---
-    Binding {
-        action: Action::Menu,
-        group: Group::Session,
-        keys: "Esc",
-        doc: "open menu",
-        chords: &[key(KeyCode::Esc)],
-    },
-    Binding {
-        action: Action::Quit,
-        group: Group::Session,
-        keys: "q / Ctrl+c",
-        doc: "quit",
-        chords: &[
-            key(KeyCode::Char('q')),
-            // Raw mode turns Ctrl+C into a plain key event (no SIGINT), so it
-            // is ours to bind. Ctrl+Shift+C stays unbound: that is a terminal
-            // copy shortcut, not a quit.
-            ctrl(KeyCode::Char('c')),
-        ],
-    },
-];
-
-/// Resolve a terminal key event to the key's identity and the action it fires.
-///
-/// A lookup over the one table: the identity that comes back is what a hold is
-/// filed under, so a Release with different modifiers still finds the motion it
-/// started. The table is tiny (a couple of dozen chords), so a linear scan is
-/// the clearest implementation — there is no generated keymap to keep in step.
-fn resolve_key_event(code: KeyCode, mods: KeyModifiers) -> Option<(KeyCode, Action)> {
-    // A chord is a key plus at most Shift and Ctrl: Alt, Super, Hyper and Meta
-    // bind nothing, whatever the key is.
-    let allowed = KeyModifiers::SHIFT.union(KeyModifiers::CONTROL);
-    if !mods.difference(allowed).is_empty() {
-        return None;
-    }
-    let (base, shift) = canonical_key(code, mods);
-    let control = mods.contains(KeyModifiers::CONTROL);
-    BINDINGS
-        .iter()
-        .flat_map(|binding| {
-            binding
-                .chords
-                .iter()
-                .map(move |chord| (binding.action, chord))
-        })
-        .find(|(action, chord)| {
-            let (chord_base, chord_shift) = canonical_key(chord.code, chord.mods);
-            if chord_base != base || chord.mods.contains(KeyModifiers::CONTROL) != control {
-                return false;
-            }
-            // Ctrl motion chords ignore Shift, matching the old Ctrl+Shift+h
-            // alias. Ctrl+C quit stays strict: Ctrl+Shift+C is a terminal copy
-            // shortcut, not a quit.
-            if control && !matches!(*action, Action::Quit) {
-                true
-            } else {
-                chord_shift == shift
-            }
-        })
-        .map(|(action, _)| (base, action))
-}
-
-/// The conventional spelling of a chord: modifiers in `Ctrl+Shift+` order,
-/// then the key. A shifted letter is the lowercase key (`Shift+h`), because the
-/// chord names the key, not the glyph. Test-only: the help panel's display
-/// text lives in [`Binding::keys`], and a test ties the two together.
-#[cfg(test)]
-impl Chord {
-    fn label(&self) -> String {
-        let mut out = String::new();
-        if self.mods.contains(KeyModifiers::CONTROL) {
-            out.push_str("Ctrl+");
-        }
-        if self.mods.contains(KeyModifiers::SHIFT) {
-            out.push_str("Shift+");
-        }
-        match self.code {
-            KeyCode::Char(' ') => out.push_str("Space"),
-            KeyCode::Char(c) => {
-                if self.mods.contains(KeyModifiers::SHIFT) && c.is_ascii_uppercase() {
-                    out.push(c.to_ascii_lowercase());
-                } else {
-                    out.push(c);
-                }
-            }
-            KeyCode::Esc => out.push_str("Esc"),
-            KeyCode::Tab => out.push_str("Tab"),
-            KeyCode::BackTab => out.push_str(if self.mods.contains(KeyModifiers::SHIFT) {
-                "Tab"
-            } else {
-                "BackTab"
-            }),
-            KeyCode::Left => out.push_str("Left"),
-            KeyCode::Right => out.push_str("Right"),
-            KeyCode::Up => out.push_str("Up"),
-            KeyCode::Down => out.push_str("Down"),
-            other => out.push_str(&format!("{other:?}")),
-        }
-        out
-    }
-}
-
-/// One frame of smooth continuous motion for a held key (model follows key).
-fn continuous_step(view: &mut ViewState, m: Motion, speed: f64, dt: f64) {
-    apply_motion_step(view, m, ROT_RATE * dt, speed * dt);
-}
-
-/// Apply one motion step: rotation around the world or the model's own axes,
-/// pan in world X/Y, dolly along the view axis.
-fn apply_motion_step(view: &mut ViewState, m: Motion, rot: f64, mv: f64) {
-    match m {
-        // World-frame rotation: yaw/pitch pre-multiply the model->world matrix
-        // with a fixed world-axis rotation, so the axes are anchored to the
-        // world and never follow the model. The keys read as the viewer sees
-        // them: the model faces out of the screen while the sight line points
-        // into it, so plain `h` sweeps the nose toward screen-left. Pitch has
-        // no mirror (the model's up is the viewer's up), so `k`/`j` read the
-        // same way.
-        Motion::YawLeft => view.add_yaw(-rot),
-        Motion::YawRight => view.add_yaw(rot),
-        Motion::PitchUp => view.add_pitch(-rot),
-        Motion::PitchDown => view.add_pitch(rot),
-        // World-frame roll: the third member of the yaw/pitch family —
-        // positive roll spins the image anticlockwise, so `d` (QWERTY, left of
-        // `f`) dips the viewer's screen-left side and `f` dips the right.
-        Motion::RollPlus => view.add_roll(-rot),
-        Motion::RollMinus => view.add_roll(rot),
-        // Local-frame rotation: the same step post-multiplied, so the axis
-        // rides with the model. The direction convention is the same as the
-        // world keys; only the axis frame changes.
-        Motion::LocalYawLeft => view.add_yaw_local(rot),
-        Motion::LocalYawRight => view.add_yaw_local(-rot),
-        Motion::LocalPitchUp => view.add_pitch_local(-rot),
-        Motion::LocalPitchDown => view.add_pitch_local(rot),
-        Motion::LocalRollPlus => view.add_roll_local(rot),
-        Motion::LocalRollMinus => view.add_roll_local(-rot),
-        // Pan shifts the model in world X/Y at any orientation; the rotation
-        // centre is the panned file origin (see view::project_point).
-        Motion::MoveLeft => view.pan_x -= mv,
-        Motion::MoveRight => view.pan_x += mv,
-        Motion::MoveUp => view.pan_y += mv,
-        Motion::MoveDown => view.pan_y -= mv,
-        // Translation along the view axis (camera distance).
-        Motion::MoveForward => view.add_dist_delta(-mv),
-        Motion::MoveBack => view.add_dist_delta(mv),
-    }
-    // Angles are periodic; keep the displayed values in [-PI, PI].
-    view.normalize();
-}
 
 /// How many leading bytes are probed to detect the file format.
 const PROBE_BYTES: usize = 4096;
@@ -814,6 +313,55 @@ fn load_model_from_text(name: &str, text: &str) -> Result<(Model, String), Strin
         edges: wrfm_data.edges,
     };
     Ok((model, wrfm_data.name))
+}
+
+/// Load the session's target: a blank canvas, a stream, or a path. Errors are
+/// display-ready and keep the caller's original labels.
+fn load_target(
+    blank: bool,
+    target_file: &Path,
+    is_stream: bool,
+    is_stdin: bool,
+) -> Result<(Model, String), String> {
+    if blank {
+        // No FILE on a terminal: nothing to read, nothing to open. The viewer
+        // starts on an empty canvas — the bar's pill says "no file" — and
+        // every key keeps working; there is no model to rotate.
+        return Ok((Model::default(), "no file".to_string()));
+    }
+    if is_stream {
+        // Stream path: read all of stdin (or the FIFO) once, probe the whole
+        // BUFFER (not the path) and parse it.
+        let mut buf = String::new();
+        if is_stdin {
+            io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("cannot read stdin: {e}"))?;
+        } else {
+            std::fs::File::open(target_file)
+                .map_err(|e| format!("cannot open '{}': {e}", target_file.display()))?
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("cannot read '{}': {e}", target_file.display()))?;
+        }
+        let name = if is_stdin {
+            "stdin".to_string()
+        } else {
+            target_file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("fifo")
+                .to_string()
+        };
+        let label = if is_stdin {
+            "-".to_string()
+        } else {
+            target_file.display().to_string()
+        };
+        return load_model_from_text(&name, &buf)
+            .map_err(|e| format!("Failed to load '{label}': {e}"));
+    }
+    load_model(target_file)
+        .map_err(|e| format!("Failed to load '{}': {}", target_file.display(), e))
 }
 
 // ---------------------------------------------------------------------------
@@ -1388,14 +936,9 @@ struct App {
     /// model name is only the file stem; `None` shows the model name.
     strip_label: Option<String>,
     view: ViewState,
-    /// Keys currently held down, keyed by their identity (the base key from
-    /// `canonical_key`), so Release finds the right hold even when the
-    /// modifiers changed since the Press.
-    held: HashMap<KeyCode, Motion>,
-    /// True once the terminal delivered a Release. From then on a key press
-    /// can start a continuous hold; before that (a legacy terminal, or the very
-    /// first key of a kitty session) a press is one finite step.
-    release_seen: bool,
+    /// Keys that are down and moving the view, plus the key-up capability and
+    /// the legacy repeat clocks. All motion-input state lives here.
+    input: MotionInput,
     auto_spin: bool,
     overlay: Overlay,
     /// The Esc menu's cursor, preserved across sub-panels and reopenings.
@@ -1431,8 +974,7 @@ impl App {
             name,
             strip_label,
             view,
-            held: HashMap::new(),
-            release_seen: false,
+            input: MotionInput::new(false),
             auto_spin: false,
             overlay: Overlay::None,
             menu_selection: 0,
@@ -1447,24 +989,10 @@ impl App {
         self.speed
     }
 
-    /// One finite motion step, for a tap or for a terminal that cannot report
-    /// key-up. The step is small enough to be a nudge and large enough to be
-    /// visible: a tap must never depend on how long the frame took.
-    fn apply_tap(&mut self, motion: Motion) {
-        let speed = self.translation_speed();
-        let mv = match motion {
-            Motion::MoveForward | Motion::MoveBack => speed * TAP_DOLLY,
-            _ => speed * TAP_PAN,
-        };
-        apply_motion_step(&mut self.view, motion, TAP_ROT, mv);
-        self.dirty = true;
-    }
-
-    /// Key-up: drop the hold by identity. The modifiers of the Release event
-    /// are irrelevant — they may well differ from the Press (release Shift
-    /// before `h` and the event no longer carries SHIFT).
-    fn hold_key_up(&mut self, hold_id: KeyCode) {
-        if self.held.remove(&hold_id).is_some() {
+    /// Drop every motion hold and legacy repeat clock. FocusLost and the modal
+    /// overlays use this; the key-up capability survives.
+    fn clear_holds(&mut self) {
+        if self.input.clear() {
             self.dirty = true;
         }
     }
@@ -1473,7 +1001,7 @@ impl App {
     /// activates an item — while q and Ctrl+C still fall through to the
     /// global quit.
     fn open_menu(&mut self) {
-        self.held.clear();
+        self.clear_holds();
         // Like a fresh menu: Esc then Enter always lands on the first item,
         // never on an Exit the previous visit happened to leave selected.
         self.menu_selection = MENU_KEY_BINDINGS;
@@ -1575,7 +1103,7 @@ impl App {
     /// Open the key reference from the menu. It is modal: Esc/Enter goes back
     /// to the hub, and the model does not react behind the panel.
     fn open_help(&mut self) {
-        self.held.clear();
+        self.clear_holds();
         self.overlay = Overlay::Help;
         self.dirty = true;
     }
@@ -1583,13 +1111,14 @@ impl App {
     /// Open the About panel. It is always reached through the menu, so it
     /// returns there on Esc/Enter.
     fn open_about(&mut self) {
-        self.held.clear();
+        self.clear_holds();
         self.overlay = Overlay::About;
         self.dirty = true;
     }
 
-    /// Handle one terminal input event. Returns true when the loop must break (quit).
-    fn handle_input(&mut self, ev: Event) -> bool {
+    /// Handle one terminal input event at the instant the reader observed it.
+    /// Returns true when the loop must break (quit).
+    fn handle_input_at(&mut self, ev: Event, at: Instant) -> bool {
         // Key and focus events are the only input handled: mouse capture is
         // OFF (native terminal drag-selection works), so the app never
         // receives mouse events; Event::Resize is handled by the loop (it
@@ -1597,25 +1126,25 @@ impl App {
         // Focus loss: the key-up of a key held across an alt-tab reaches the
         // other window, so no Release ever arrives — drop the holds here.
         if let Event::FocusLost = ev {
-            if !self.held.is_empty() {
-                self.held.clear();
-                self.dirty = true;
-            }
+            self.clear_holds();
             return false;
         }
         let Event::Key(key) = ev else {
             return false;
         };
-        // A Release is direct evidence that the terminal reports key-up: from
-        // here on a press can start a continuous hold. It is matched by
-        // IDENTITY, because a Release may carry different modifiers than the
-        // Press (release Shift before `h` and SHIFT is gone). A Release is
+        // Any key event proves the keyboard is alive; the watchdog only cares
+        // about silence, so UI keys refresh it too.
+        self.input.note_key(at);
+        // A Release is direct evidence that the terminal reports key-up. It is
+        // matched by IDENTITY because it may carry different modifiers than
+        // the Press (release Shift before `h` and SHIFT is gone). A Release is
         // handled before the modal branches, so no overlay can swallow the
         // evidence that key-up works.
         if key.kind == KeyEventKind::Release {
-            self.release_seen = true;
             let (hold_id, _) = canonical_key(key.code, key.modifiers);
-            self.hold_key_up(hold_id);
+            if self.input.on_release(hold_id) {
+                self.dirty = true;
+            }
             return false;
         }
         // The Esc menu is modal too; q/Ctrl+C fall through.
@@ -1638,22 +1167,12 @@ impl App {
             // Quit applies to Press and Repeat alike (holding `q` quits now).
             Action::Quit => return true,
             Action::Motion(motion) => {
-                if self.release_seen {
-                    match key.kind {
-                        // Continuous motion is clocked by the frame loop.
-                        KeyEventKind::Repeat => {}
-                        _ => {
-                            self.apply_tap(motion);
-                            self.held.insert(hold_id, motion);
-                            self.dirty = true;
-                        }
-                    }
-                } else {
-                    // No key-up reporting: each press and each auto-repeat is
-                    // one finite step. A tap can therefore never keep drifting
-                    // after the terminal goes quiet, and silence ends it
-                    // immediately rather than after a one-second timeout.
-                    self.apply_tap(motion);
+                let speed = self.translation_speed();
+                if self
+                    .input
+                    .on_motion(hold_id, motion, key.kind, at, &mut self.view, speed)
+                {
+                    self.dirty = true;
                 }
             }
             // One-shot actions fire once per tap, never at the repeat rate.
@@ -1676,19 +1195,21 @@ impl App {
         false
     }
 
-    /// Apply continuous motion to every held key each frame (dt-scaled).
-    /// Release (kitty protocol) and FocusLost are the only stops: a terminal
-    /// that reports key-up is trusted, and a terminal that does not never
-    /// creates a hold in the first place.
-    fn update_held(&mut self, dt: f64) {
-        if self.held.is_empty() {
-            return;
-        }
+    /// Handle one terminal input event timestamped now. Test-only: the main
+    /// loop uses [`App::handle_input_at`] with the reader's timestamp.
+    #[cfg(test)]
+    fn handle_input(&mut self, ev: Event) -> bool {
+        self.handle_input_at(ev, Instant::now())
+    }
+
+    /// Advance every live hold by one frame. Release (kitty protocol) and
+    /// FocusLost are the normal stops; the watchdog is the backstop for a
+    /// Release that never arrives.
+    fn advance_input(&mut self, now: Instant, dt: f64) {
         let speed = self.translation_speed();
-        for motion in self.held.values() {
-            continuous_step(&mut self.view, *motion, speed, dt);
+        if self.input.advance(now, dt, &mut self.view, speed) {
+            self.dirty = true;
         }
-        self.dirty = true;
     }
 }
 
@@ -1737,13 +1258,31 @@ impl Engine {
     }
 }
 
+/// One terminal event and the instant the input thread read it. The timestamp
+/// gives legacy auto-repeat its real gap even when a frame stall lets several
+/// events queue before the loop drains them.
+struct InputEvent {
+    at: Instant,
+    event: Event,
+}
+
+/// Ask the terminal whether it implements key-up reporting. Must run before
+/// the input thread starts because the query uses crossterm's internal event
+/// reader; it can block for up to two seconds on a terminal that never
+/// answers. A false result only falls back to the observed Release, so a
+/// multiplexer that hides the query does not disable holds forever.
+fn terminal_reports_key_up() -> bool {
+    crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
+}
+
 /// The only crossterm event reader in the process (blocks on the tty).
-fn spawn_input_thread(tx: Sender<Event>) {
+fn spawn_input_thread(tx: Sender<InputEvent>) {
     let _ = thread::Builder::new()
         .name("wireforge-input".into())
         .spawn(move || {
-            while let Ok(ev) = event::read() {
-                if tx.send(ev).is_err() {
+            while let Ok(event) = event::read() {
+                let at = Instant::now();
+                if tx.send(InputEvent { at, event }).is_err() {
                     break;
                 }
             }
@@ -2025,54 +1564,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     }
 
-    let (current_model, model_name) = if blank {
-        // No FILE on a terminal: nothing to read, nothing to open. The
-        // viewer starts on an empty canvas — the bar's pill says
-        // "no file" — and every key keeps working; there is no model to
-        // rotate.
-        (Model::default(), "no file".to_string())
-    } else if is_stream {
-        // Stream path: read all of stdin (or the FIFO) once, probe the
-        // whole BUFFER (not the path) and parse it.
-        let mut buf = String::new();
-        if is_stdin {
-            io::stdin()
-                .read_to_string(&mut buf)
-                .map_err(|e| format!("cannot read stdin: {e}"))?;
-        } else {
-            std::fs::File::open(&target_file)
-                .map_err(|e| format!("cannot open '{}': {e}", target_file.display()))?
-                .read_to_string(&mut buf)
-                .map_err(|e| format!("cannot read '{}': {e}", target_file.display()))?;
+    // Stream loads stay before terminal setup: a FIFO can block until a writer
+    // appears, and the shell must stay usable until then. A finite load (blank
+    // or a regular file) runs after raw mode and the kitty flags are active, so
+    // a key pressed during a slow load is already encoded as a kitty event.
+    let preloaded = if is_stream {
+        match load_target(blank, &target_file, is_stream, is_stdin) {
+            Ok(loaded) => Some(loaded),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
         }
-        let name = if is_stdin {
-            "stdin".to_string()
-        } else {
-            target_file
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("fifo")
-                .to_string()
-        };
-        let label = if is_stdin {
-            "-".to_string()
-        } else {
-            target_file.display().to_string()
-        };
-        load_model_from_text(&name, &buf).unwrap_or_else(|e| {
-            eprintln!("Failed to load '{label}': {e}");
-            std::process::exit(1);
-        })
     } else {
-        load_model(&target_file).unwrap_or_else(|e| {
-            eprintln!("Failed to load '{}': {}", target_file.display(), e);
-            std::process::exit(1);
-        })
+        None
     };
 
     // The event queue: one channel, one blocking consumer — the input thread
     // is the only crossterm reader, and it pushes events here.
-    let (tx, rx) = mpsc::channel::<Event>();
+    let (tx, rx) = mpsc::channel::<InputEvent>();
 
     enable_raw_mode()?;
     // From here on every exit path (return value, `?` error or panic) must
@@ -2103,43 +1613,62 @@ fn main() -> Result<(), Box<dyn Error>> {
     // other window, so the app drops its holds itself on FocusLost.
     let _ = execute!(stdout, EnableFocusChange);
 
+    // Probe key-up support before the input thread exists. The probe can block
+    // for up to two seconds on a terminal that never answers, so it runs while
+    // the finite model load does.
+    let key_up_probe = thread::spawn(terminal_reports_key_up);
+    let loaded = match preloaded {
+        Some(loaded) => loaded,
+        None => match load_target(blank, &target_file, is_stream, is_stdin) {
+            Ok(loaded) => loaded,
+            Err(message) => {
+                restore_terminal();
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        },
+    };
+    let reports_key_up = key_up_probe.join().unwrap_or(false);
+
     // Input thread: block in the kernel on the tty, push events through the
     // channel. Started after raw mode so the tty is in the expected state.
     spawn_input_thread(tx.clone());
 
     // L2 engine + viewer state.
+    let (current_model, model_name) = loaded;
     let (cols, rows) = crossterm::terminal::size()?;
     let mut app = App::new(current_model, model_name, strip_label, args.vfov);
+    app.input.set_key_up(reports_key_up);
     let mut engine = Engine::new(cols as usize, rows as usize);
     let mut timers = TimerScheduler::new();
-    let mut last = Instant::now();
 
     // Initial frame: the previous screen is all-space, so the first present
     // writes every non-space cell (same first-frame semantics as before).
     render_frame(&mut app, &mut engine, &mut stdout)?;
     app.dirty = false;
     timers.schedule(TimerId::ResizeCheck, Instant::now() + RESIZE_CHECK_INTERVAL);
+    let mut last = Instant::now();
 
     'main: loop {
         let now = Instant::now();
-        let dt = (now - last).as_secs_f64().min(0.1);
+        let dt = (now - last).as_secs_f64().min(MAX_FRAME_DT.as_secs_f64());
         last = now;
 
         // The two SDL-style loop modes: animating = drain +
         // update + render as fast as possible, no waiting; idle = block in
         // the channel until the earliest timer or an event.
-        let animating = app.auto_spin || !app.held.is_empty();
+        let animating = app.auto_spin || app.input.is_active();
 
         if animating {
             // Drain the event backlog (no waiting, no cap).
-            while let Ok(ev) = rx.try_recv() {
-                match ev {
+            while let Ok(InputEvent { at, event }) = rx.try_recv() {
+                match event {
                     Event::Resize(cols, rows) => {
                         engine.resize(cols as usize, rows as usize);
                         app.dirty = true;
                     }
                     ev => {
-                        if app.handle_input(ev) {
+                        if app.handle_input_at(ev, at) {
                             break 'main;
                         }
                     }
@@ -2148,7 +1677,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Timers can fire mid-animation too.
             fire_due_timers(&mut app, &mut engine, &mut timers, now);
             // One frame of smooth motion for every held key.
-            app.update_held(dt);
+            app.advance_input(Instant::now(), dt);
             if app.auto_spin {
                 // Space auto-spin: rotate the model around its own (local) Y
                 // axis (view::ViewState::spin_local) — a globe turning in
@@ -2164,38 +1693,42 @@ fn main() -> Result<(), Box<dyn Error>> {
             let wait = timers
                 .earliest()
                 .map(|d| d.saturating_duration_since(Instant::now()));
-            let msg: Result<Event, mpsc::RecvTimeoutError> = match wait {
+            let msg: Result<InputEvent, mpsc::RecvTimeoutError> = match wait {
                 Some(t) => rx.recv_timeout(t),
                 None => match rx.recv() {
                     Ok(e) => Ok(e),
                     Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
                 },
             };
+            // The blocked wait is not motion time: reset the frame clock so the
+            // first animated frame after a key press is not a 100 ms step.
+            let woke_at = Instant::now();
+            last = woke_at;
             match msg {
-                Ok(ev) => {
-                    match ev {
+                Ok(InputEvent { at, event }) => {
+                    match event {
                         Event::Resize(cols, rows) => {
                             engine.resize(cols as usize, rows as usize);
                             app.dirty = true;
                         }
                         ev => {
-                            if app.handle_input(ev) {
+                            if app.handle_input_at(ev, at) {
                                 break 'main;
                             }
                         }
                     }
                     // Due timers also advance while events keep arriving, so a
                     // steady stream cannot starve them until the queue drains.
-                    fire_due_timers(&mut app, &mut engine, &mut timers, now);
+                    fire_due_timers(&mut app, &mut engine, &mut timers, woke_at);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     // The kernel woke us exactly at the earliest deadline.
-                    fire_due_timers(&mut app, &mut engine, &mut timers, now);
+                    fire_due_timers(&mut app, &mut engine, &mut timers, woke_at);
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break 'main,
             }
-            // Advance any continuous hold (kitty key-up reporting only).
-            app.update_held(dt);
+            // A hold created by this event is advanced by the next animation
+            // frame, whose dt starts at the wake instant.
             // Redraw only when something actually changed (dirty-flag).
             if app.dirty {
                 render_frame(&mut app, &mut engine, &mut stdout)?;
@@ -2212,14 +1745,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::HOLD_WATCHDOG;
+    use crate::motion::Motion;
+    use crate::motion::TAP_PAN;
     use std::fs;
-
-    /// The speed constants are dyadic fractions (exact in binary).
-    #[test]
-    fn speed_constants_are_dyadic_and_exact() {
-        assert_eq!(ROT_RATE * 128.0, 169.0);
-        assert_eq!(SPIN_RATE * 256.0, 169.0);
-    }
 
     /// Write `content` to a uniquely named temp file and return its path.
     fn temp_file(name: &str, content: &str) -> PathBuf {
@@ -2494,264 +2023,6 @@ mod tests {
         assert!(!text.contains("pan"), "pan sheds first: {text:?}");
         let tiny = bar_text(&bar_cells(&app, 12));
         assert!(tiny.contains('…'), "a cut name is marked: {tiny:?}");
-    }
-
-    // ---------- keymap: BINDINGS <-> resolve_key_event ----------
-
-    #[test]
-    fn keymap_resolves_the_documented_chords() {
-        // Each row is an event as a terminal reports it, and what the viewer
-        // must do with it. This is behaviour, not a second copy of the table:
-        // the table is what actually resolves it, and the rows are the cases a
-        // reader would expect.
-        use KeyCode::*;
-        let cases: &[(&str, KeyCode, KeyModifiers, Option<Action>)] = &[
-            (
-                "h rotates",
-                Char('h'),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::YawLeft)),
-            ),
-            (
-                "l rotates",
-                Char('l'),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::YawRight)),
-            ),
-            (
-                "k pitches up",
-                Char('k'),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::PitchUp)),
-            ),
-            (
-                "j pitches down",
-                Char('j'),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::PitchDown)),
-            ),
-            (
-                "d rolls",
-                Char('d'),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::RollMinus)),
-            ),
-            (
-                "f rolls",
-                Char('f'),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::RollPlus)),
-            ),
-            (
-                "Shift+h pans",
-                Char('h'),
-                KeyModifiers::SHIFT,
-                Some(Action::Motion(Motion::MoveLeft)),
-            ),
-            (
-                "Shift+H is the same chord",
-                Char('H'),
-                KeyModifiers::SHIFT,
-                Some(Action::Motion(Motion::MoveLeft)),
-            ),
-            (
-                "Ctrl+h yaws locally",
-                Char('h'),
-                KeyModifiers::CONTROL,
-                Some(Action::Motion(Motion::LocalYawLeft)),
-            ),
-            (
-                "Ctrl+Left is the same",
-                Left,
-                KeyModifiers::CONTROL,
-                Some(Action::Motion(Motion::LocalYawLeft)),
-            ),
-            (
-                "Ctrl+Shift+h is the same",
-                Char('H'),
-                KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
-                Some(Action::Motion(Motion::LocalYawLeft)),
-            ),
-            (
-                "Ctrl+l yaws the other way",
-                Char('l'),
-                KeyModifiers::CONTROL,
-                Some(Action::Motion(Motion::LocalYawRight)),
-            ),
-            (
-                "Ctrl+k pitches up",
-                Char('k'),
-                KeyModifiers::CONTROL,
-                Some(Action::Motion(Motion::LocalPitchUp)),
-            ),
-            (
-                "Ctrl+j pitches down",
-                Char('j'),
-                KeyModifiers::CONTROL,
-                Some(Action::Motion(Motion::LocalPitchDown)),
-            ),
-            (
-                "Ctrl+d rolls locally",
-                Char('d'),
-                KeyModifiers::CONTROL,
-                Some(Action::Motion(Motion::LocalRollMinus)),
-            ),
-            (
-                "Ctrl+f rolls the other way",
-                Char('f'),
-                KeyModifiers::CONTROL,
-                Some(Action::Motion(Motion::LocalRollPlus)),
-            ),
-            (
-                "+ zooms in",
-                Char('+'),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::MoveForward)),
-            ),
-            (
-                "= is the same chord",
-                Char('='),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::MoveForward)),
-            ),
-            (
-                "- zooms out",
-                Char('-'),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::MoveBack)),
-            ),
-            (
-                "_ is the same chord",
-                Char('_'),
-                KeyModifiers::NONE,
-                Some(Action::Motion(Motion::MoveBack)),
-            ),
-            (
-                "a is unbound; Tab toggles the axes",
-                Char('a'),
-                KeyModifiers::NONE,
-                None,
-            ),
-            (
-                "Tab toggles the axes",
-                Tab,
-                KeyModifiers::NONE,
-                Some(Action::Axes),
-            ),
-            (
-                "? is unbound; Key Bindings lives in the menu",
-                Char('?'),
-                KeyModifiers::NONE,
-                None,
-            ),
-            (
-                "Shift+/ is also unbound",
-                Char('/'),
-                KeyModifiers::SHIFT,
-                None,
-            ),
-            (
-                "r resets",
-                Char('r'),
-                KeyModifiers::NONE,
-                Some(Action::Reset),
-            ),
-            (
-                "Space spins",
-                Char(' '),
-                KeyModifiers::NONE,
-                Some(Action::Spin),
-            ),
-            ("q quits", Char('q'), KeyModifiers::NONE, Some(Action::Quit)),
-            (
-                "Esc opens the menu",
-                Esc,
-                KeyModifiers::NONE,
-                Some(Action::Menu),
-            ),
-            (
-                "Ctrl+C quits",
-                Char('c'),
-                KeyModifiers::CONTROL,
-                Some(Action::Quit),
-            ),
-            (
-                "Ctrl+Shift+C is copy, not quit",
-                Char('C'),
-                KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
-                None,
-            ),
-            ("Shift+q is not q", Char('q'), KeyModifiers::SHIFT, None),
-            ("Shift+r is not r", Char('r'), KeyModifiers::SHIFT, None),
-            ("Alt swallows the key", Char('h'), KeyModifiers::ALT, None),
-            (
-                "Alt swallows even Space",
-                Char(' '),
-                KeyModifiers::ALT,
-                None,
-            ),
-            (
-                "an unbound letter does nothing",
-                Char('z'),
-                KeyModifiers::NONE,
-                None,
-            ),
-        ];
-        for (what, code, mods, expected) in cases {
-            assert_eq!(
-                resolve_key_event(*code, *mods).map(|(_, action)| action),
-                *expected,
-                "{what}: {code:?}+{mods:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn bindings_cover_every_action_exactly_once() {
-        // Two rows describing one action would make the overlay list it twice;
-        // a row describing none would list a phantom.
-        for b in BINDINGS {
-            let hits = BINDINGS.iter().filter(|o| o.action == b.action).count();
-            assert_eq!(hits, 1, "{:?} is documented {hits} times", b.action);
-        }
-    }
-
-    #[test]
-    fn chord_labels_follow_one_convention() {
-        // A single spelling convention, checked mechanically: modifiers in
-        // Ctrl-then-Shift order, no spaces, upper-case only when SHIFT is in
-        // the chord. Anything else is a typo waiting to mislead someone.
-        for b in BINDINGS {
-            for c in b.chords {
-                let l = c.label();
-                assert!(!l.contains(' ') || l == "Space", "{l:?} has a stray space");
-                assert!(
-                    !l.contains("Shift+Ctrl"),
-                    "{l}: modifier order is Ctrl+Shift+"
-                );
-                let ctrl_at = l.find("Ctrl+");
-                let shift_at = l.find("Shift+");
-                if let (Some(cs), Some(sc)) = (ctrl_at, shift_at) {
-                    assert!(cs < sc, "{l}: Ctrl must come before Shift");
-                }
-                // The chord names the key, not the shifted glyph: after
-                // `Shift+` a single letter is the lowercase form (`Shift+h`),
-                // the same way `h` and `Shift+h` read. Named keys (`Left`,
-                // `Tab`) have no glyph to case, so only single letters check.
-                if let Some([c]) = l.strip_prefix("Shift+").and_then(|r| {
-                    let mut it = r.chars();
-                    match (it.next(), it.next()) {
-                        (Some(c), None) => Some([c]),
-                        _ => None,
-                    }
-                }) {
-                    assert!(
-                        c.is_lowercase() || !c.is_alphabetic(),
-                        "{l}: Shift+ must be followed by the key's lowercase letter"
-                    );
-                }
-            }
-        }
     }
 
     // ---------- help panel layout ----------
@@ -3405,15 +2676,15 @@ mod tests {
         // The key-up of a key held across an alt-tab reaches the other
         // window, so no Release arrives: FocusLost is the only signal.
         let mut app = app_with("cube");
-        app.release_seen = true;
+        app.input.set_key_up(true);
         app.handle_input(Event::Key(KeyEvent::new(
             KeyCode::Right,
             KeyModifiers::NONE,
         )));
-        assert_eq!(app.held.len(), 1);
+        assert_eq!(app.input.hold_count(), 1);
         app.dirty = false;
         assert!(!app.handle_input(Event::FocusLost));
-        assert!(app.held.is_empty(), "focus loss must stop every hold");
+        assert!(!app.input.is_active(), "focus loss must stop every hold");
         assert!(app.dirty, "the cleared hold must repaint");
     }
 
@@ -3468,7 +2739,9 @@ mod tests {
     #[test]
     fn app_handle_input_motion_press_starts_continuous() {
         let mut app = app_with("cube");
-        app.release_seen = true;
+        // The start-up probe marks a key-up terminal before any Release arrives:
+        // the very first Press must already start a hold.
+        app.input.set_key_up(true);
         let yaw0 = app.view.yaw;
         // Press: one immediate step, then a hold that the frame clock drives.
         app.handle_input(Event::Key(KeyEvent::new(
@@ -3476,7 +2749,7 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert!(
-            app.held.contains_key(&KeyCode::Right),
+            app.input.held_motion(KeyCode::Right).is_some(),
             "press must enter continuous state"
         );
         assert_ne!(app.view.yaw, yaw0, "a press gives immediate feedback");
@@ -3487,16 +2760,130 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert_eq!(
-            app.held.len(),
+            app.input.hold_count(),
             1,
             "auto-repeat must not accumulate held entries"
         );
-        // Continuous motion is applied by update_held.
-        app.update_held(0.016);
+        // Continuous motion is applied by advance_input.
+        app.advance_input(Instant::now(), 0.016);
         assert_ne!(
             app.view.yaw, yaw1,
             "held key must rotate continuously immediately"
         );
+    }
+
+    #[test]
+    fn app_hold_steps_to_the_fast_gear_after_200ms() {
+        // The App wiring must pass the same press timestamp through to the
+        // gear clock: a frame at 199 ms is slow, the next at 200 ms is fast,
+        // and the ratio is exactly the fixed multiplier.
+        let mut app = app_with("cube");
+        app.input.set_key_up(true);
+        let t0 = Instant::now();
+        app.handle_input_at(
+            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            t0,
+        );
+        let yaw = app.view.yaw;
+        app.advance_input(t0 + Duration::from_millis(199), 0.01);
+        let slow = app.view.yaw - yaw;
+        let yaw = app.view.yaw;
+        app.advance_input(t0 + Duration::from_millis(200), 0.01);
+        let fast = app.view.yaw - yaw;
+        assert!((fast / slow - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn legacy_auto_repeat_scales_by_the_event_gap() {
+        // A terminal without key-up reports repeats as more Press events. The
+        // first event after the initial repeat delay is a tap; steady repeats
+        // are scaled by their gap, so 25 Hz and 50 Hz repeat settings produce
+        // the same speed instead of 25 or 50 tap-sized steps per second.
+        let mut app = app_with("cube");
+        let speed = app.translation_speed();
+        let t0 = Instant::now();
+        let press = || Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        let pan0 = app.view.pan_x;
+        app.handle_input_at(press(), t0);
+        let after_press = app.view.pan_x;
+        assert!(
+            (pan0 - after_press - speed * TAP_PAN).abs() < 1e-12,
+            "the first press is one finite pan step"
+        );
+
+        // The first auto-repeat after the initial delay is still a tap: scaling
+        // it by the whole delay would jump.
+        app.handle_input_at(press(), t0 + Duration::from_millis(600));
+        let after_first_repeat = app.view.pan_x;
+        assert!(
+            (after_press - after_first_repeat - speed * TAP_PAN).abs() < 1e-12,
+            "the first repeat after the delay must not jump"
+        );
+
+        // The next repeat arrives 40 ms later: one frame of continuous motion,
+        // not another tap fraction.
+        app.handle_input_at(press(), t0 + Duration::from_millis(640));
+        let after_second_repeat = app.view.pan_x;
+        let step = after_first_repeat - after_second_repeat;
+        assert!(
+            (step - speed * 0.040).abs() < 1e-12,
+            "a repeat step must follow its gap: {step} vs {}",
+            speed * 0.040
+        );
+        assert!(!app.input.is_active(), "legacy repeats never create a hold");
+    }
+
+    #[test]
+    fn app_repeat_promotes_a_hold_when_key_up_is_learned_mid_press() {
+        // The first press is a legacy tap; a Release of another key then proves
+        // key-up works. The still-held key's next Repeat must promote it to a
+        // hold instead of being swallowed until the user releases and re-presses.
+        let mut app = app_with("cube");
+        let t0 = Instant::now();
+        app.handle_input_at(
+            Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            t0,
+        );
+        assert!(!app.input.is_active(), "cold press is still a finite tap");
+        assert!(app.input.has_legacy(KeyCode::Char('h')));
+
+        let mut release = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+        app.handle_input_at(Event::Key(release), t0 + Duration::from_millis(10));
+        assert!(app.input.reports_key_up());
+
+        let mut repeat = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        repeat.kind = KeyEventKind::Repeat;
+        app.handle_input_at(Event::Key(repeat), t0 + Duration::from_millis(20));
+        assert_eq!(
+            app.input.held_motion(KeyCode::Char('h')),
+            Some(Motion::YawLeft),
+            "the Repeat must promote the still-held key"
+        );
+        assert!(
+            !app.input.has_legacy(KeyCode::Char('h')),
+            "the promoted hold no longer needs the legacy repeat clock"
+        );
+    }
+
+    #[test]
+    fn app_lost_release_watchdog_stops_a_hold() {
+        let mut app = app_with("cube");
+        app.input.set_key_up(true);
+        app.handle_input(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.input.hold_count(), 1);
+        app.input
+            .note_key(Instant::now() - HOLD_WATCHDOG - Duration::from_millis(1));
+        app.dirty = false;
+        app.advance_input(Instant::now(), 0.016);
+        assert!(
+            !app.input.is_active(),
+            "a lost Release must not move forever"
+        );
+        assert!(app.dirty, "clearing the watchdog hold must repaint");
     }
 
     /// The roll keys (`d` / `f`) roll the MODEL about the world Z axis — the
@@ -3601,35 +2988,44 @@ mod tests {
 
     #[test]
     fn legacy_press_is_one_finite_step() {
-        // A terminal without key-up reporting never creates a hold: each press
-        // and each auto-repeat is one step. A tap can therefore never drift
-        // after the terminal goes quiet, which is what the old one-second
-        // timeout used to allow.
+        // A terminal without key-up reporting never creates a hold: the first
+        // press is one finite step, and later auto-repeat steps are scaled by
+        // their gap rather than becoming a drifting hold. A tap can therefore
+        // never keep moving after the terminal goes quiet.
         let mut app = app_with("cube");
-        assert!(!app.release_seen, "a fresh app has not seen key-up yet");
+        assert!(
+            !app.input.reports_key_up(),
+            "a fresh app has not probed or seen key-up yet"
+        );
         let yaw = app.view.yaw;
         app.handle_input(Event::Key(KeyEvent::new(
             KeyCode::Right,
             KeyModifiers::NONE,
         )));
-        assert!(app.held.is_empty(), "legacy presses must not leave a hold");
+        assert!(
+            !app.input.is_active(),
+            "legacy presses must not leave a hold"
+        );
         assert_ne!(app.view.yaw, yaw, "the press still moves the model");
         let after = app.view.yaw;
-        app.update_held(1.0);
+        app.advance_input(Instant::now(), 1.0);
         assert_eq!(app.view.yaw, after, "no hold means no drift");
     }
 
     #[test]
     fn app_key_release_removes_held_entry() {
         let mut app = app_with("cube");
-        app.release_seen = true;
+        app.input.set_key_up(true);
         let press = Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         app.handle_input(press);
-        assert_eq!(app.held.len(), 1, "pressure holds the motion");
+        assert_eq!(app.input.hold_count(), 1, "pressure holds the motion");
         let mut release = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         app.handle_input(Event::Key(release));
-        assert!(app.held.is_empty(), "release must stop motion immediately");
+        assert!(
+            !app.input.is_active(),
+            "release must stop motion immediately"
+        );
     }
 
     #[test]
@@ -3663,7 +3059,7 @@ mod tests {
 
         // A repeat of a held motion key does not fork or restart the hold; the
         // frame clock keeps the single motion running.
-        app.release_seen = true;
+        app.input.set_key_up(true);
         app.handle_input(Event::Key(KeyEvent::new(
             KeyCode::Right,
             KeyModifiers::NONE,
@@ -3672,32 +3068,36 @@ mod tests {
         let mut repeat = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         repeat.kind = KeyEventKind::Repeat;
         app.handle_input(Event::Key(repeat));
-        assert_eq!(app.held.len(), 1, "one key must not fork into two motions");
-        app.update_held(0.016);
+        assert_eq!(
+            app.input.hold_count(),
+            1,
+            "one key must not fork into two motions"
+        );
+        app.advance_input(Instant::now(), 0.016);
         assert_ne!(app.view.yaw, yaw, "the hold keeps moving after a repeat");
     }
 
     #[test]
     fn app_hold_survives_silence_until_release() {
-        // Once the terminal reports key-up, Release (and FocusLost) end a
-        // hold. Silence is not evidence of a released key, so there is no
-        // timeout to expire a hold that is still down.
+        // A live hold survives ordinary silence: auto-repeat may be slow or off,
+        // and silence is not evidence of a released key. The lost-Release
+        // watchdog is the separate, deliberately long backstop.
         let mut app = app_with("cube");
-        app.release_seen = true;
+        app.input.set_key_up(true);
         app.handle_input(Event::Key(KeyEvent::new(
             KeyCode::Right,
             KeyModifiers::NONE,
         )));
         let yaw = app.view.yaw;
         for _ in 0..100 {
-            app.update_held(0.05);
+            app.advance_input(Instant::now(), 0.05);
         }
-        assert_eq!(app.held.len(), 1, "a hold must survive silence");
+        assert_eq!(app.input.hold_count(), 1, "a hold must survive silence");
         assert_ne!(app.view.yaw, yaw, "and keep moving");
         let mut release = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         app.handle_input(Event::Key(release));
-        assert!(app.held.is_empty(), "release must stop the motion");
+        assert!(!app.input.is_active(), "release must stop the motion");
     }
 
     #[test]
@@ -3724,89 +3124,6 @@ mod tests {
         assert_eq!(m.vertices.len(), 2);
         assert_eq!(m.edges.len(), 1);
         assert_eq!(name, "stream");
-    }
-    #[test]
-    fn motion_keys_read_as_the_viewer_sees_them() {
-        // The model faces out of the screen (+Z) while the sight line points
-        // into it, so `h` sweeps the nose toward screen-left. Pitch has no
-        // mirror (the model's up is the viewer's up); roll is the third member
-        // of the same world-frame family.
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::YawLeft, 0.3, 0.0);
-        // The nose is the third column of the model->world matrix.
-        assert!(v.rot[0][2] < 0.0, "h must sweep the nose screen-left");
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::YawRight, 0.3, 0.0);
-        assert!(v.rot[0][2] > 0.0, "l must sweep it screen-right");
-
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::PitchUp, 0.3, 0.0);
-        assert!(v.rot[1][2] > 0.0, "k must tip the nose up");
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::PitchDown, 0.3, 0.0);
-        assert!(v.rot[1][2] < 0.0, "j must tip it down");
-
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::RollMinus, 0.3, 0.0);
-        assert!(
-            v.rot[1][0] > 0.0,
-            "d rolls anticlockwise about the world Z axis"
-        );
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::RollPlus, 0.3, 0.0);
-        assert!(v.rot[1][0] < 0.0, "f rolls clockwise");
-
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::MoveLeft, 0.0, 0.5);
-        assert!(v.pan_x < 0.0, "Shift+h pans screen-left");
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::MoveUp, 0.0, 0.5);
-        assert!(v.pan_y > 0.0, "Shift+k pans up");
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::MoveForward, 0.0, 0.5);
-        assert!(v.dist < ViewState::default().dist, "+ dollies nearer");
-    }
-
-    #[test]
-    fn local_rotation_uses_the_models_own_axes() {
-        // At the default view the sense mirrors the world keys; after a pitch
-        // the difference is the axis frame. A local yaw must leave the model's
-        // own Y axis fixed, while a world yaw swings that axis in the world.
-        let model_y = |view: &ViewState| [view.rot[0][1], view.rot[1][1], view.rot[2][1]];
-
-        let mut local = ViewState::default();
-        local.add_pitch(std::f64::consts::FRAC_PI_2);
-        let before = model_y(&local);
-        apply_motion_step(&mut local, Motion::LocalYawLeft, 0.3, 0.0);
-        let after = model_y(&local);
-        for i in 0..3 {
-            assert!(
-                (after[i] - before[i]).abs() < 1e-12,
-                "local yaw must leave the model Y axis fixed: {before:?} -> {after:?}"
-            );
-        }
-        assert!(
-            (local.yaw - 0.3).abs() < 1e-12,
-            "local yaw accumulates the display angle"
-        );
-
-        let mut world = ViewState::default();
-        world.add_pitch(std::f64::consts::FRAC_PI_2);
-        let before = model_y(&world);
-        apply_motion_step(&mut world, Motion::YawLeft, 0.3, 0.0);
-        let after = model_y(&world);
-        assert!(
-            (0..3).any(|i| (after[i] - before[i]).abs() > 1e-6),
-            "world yaw must move the model Y axis: {before:?} -> {after:?}"
-        );
-
-        // At the default view Ctrl+h / Ctrl+d read as the mirror of h / d.
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::LocalYawLeft, 0.3, 0.0);
-        assert!(v.rot[0][2] > 0.0, "Ctrl+h yaws to the model's own left");
-        let mut v = ViewState::default();
-        apply_motion_step(&mut v, Motion::LocalRollMinus, 0.3, 0.0);
-        assert!(v.rot[1][0] < 0.0, "Ctrl+d rolls to the model's own left");
     }
 
     #[test]
@@ -3840,161 +3157,6 @@ mod tests {
         probe_bytes(buf2).expect("magic wins over obj markers");
     }
 
-    /// Ctrl turns the model around its own axes; Ctrl+C quit stays strict so
-    /// Ctrl+Shift+C remains a terminal copy shortcut. Alt swallows the key.
-    #[test]
-    fn resolve_key_event_ctrl_rotates_locally_and_alt_swallows() {
-        use KeyCode::*;
-        assert!(matches!(
-            resolve_key_event(Char('c'), KeyModifiers::CONTROL),
-            Some((_, Action::Quit))
-        ));
-        assert_eq!(
-            resolve_key_event(Char('h'), KeyModifiers::CONTROL),
-            Some((Char('h'), Action::Motion(Motion::LocalYawLeft)))
-        );
-        assert_eq!(
-            resolve_key_event(Left, KeyModifiers::CONTROL),
-            Some((Left, Action::Motion(Motion::LocalYawLeft)))
-        );
-        assert_eq!(
-            resolve_key_event(Char('d'), KeyModifiers::CONTROL),
-            Some((Char('d'), Action::Motion(Motion::LocalRollMinus)))
-        );
-        assert_eq!(
-            resolve_key_event(Char('H'), KeyModifiers::CONTROL.union(KeyModifiers::SHIFT)),
-            Some((Char('h'), Action::Motion(Motion::LocalYawLeft)))
-        );
-        assert_eq!(resolve_key_event(Char('q'), KeyModifiers::CONTROL), None);
-        assert_eq!(
-            resolve_key_event(Char('C'), KeyModifiers::CONTROL.union(KeyModifiers::SHIFT)),
-            None
-        );
-        assert_eq!(resolve_key_event(Char('h'), KeyModifiers::ALT), None);
-        assert_eq!(resolve_key_event(Char(' '), KeyModifiers::ALT), None);
-        // Shift+Tab arrives as BackTab on both paths and still toggles the axes.
-        assert!(matches!(
-            resolve_key_event(BackTab, KeyModifiers::SHIFT),
-            Some((_, Action::Axes))
-        ));
-    }
-
-    /// The same physical input can arrive in two shapes: the **base** key plus
-    /// SHIFT (a path without alternate keys — still accepted) or the shifted
-    /// **glyph** (what a legacy terminal sends, SHIFT synthesised for
-    /// upper-case letters, and what the kitty path now sends for keys with an
-    /// alternate, SHIFT cleared). Both must resolve alike — to the same action
-    /// under the same identity when the chord is listed, or to nothing at all
-    /// when it is not (`Shift+0` types `)` and `)` binds nothing).
-    #[test]
-    fn resolve_key_event_folds_both_terminal_encodings() {
-        use KeyCode::*;
-        // Each row is (base+SHIFT form, shifted-glyph form, expected or None).
-        let cases = [
-            // Listed shifted chords: they bind, in either shape.
-            (
-                (Char('h'), KeyModifiers::SHIFT),
-                (Char('H'), KeyModifiers::SHIFT),
-                Some(Action::Motion(Motion::MoveLeft)),
-            ),
-            (
-                (Char('/'), KeyModifiers::SHIFT),
-                (Char('?'), KeyModifiers::NONE),
-                None,
-            ),
-            (
-                (Char('-'), KeyModifiers::SHIFT),
-                (Char('_'), KeyModifiers::NONE),
-                Some(Action::Motion(Motion::MoveBack)),
-            ),
-            (
-                (Char('='), KeyModifiers::SHIFT),
-                (Char('+'), KeyModifiers::NONE),
-                Some(Action::Motion(Motion::MoveForward)),
-            ),
-            // Shifted chords that are NOT listed: nothing happens, in either shape.
-            (
-                (Char('0'), KeyModifiers::SHIFT),
-                (Char(')'), KeyModifiers::NONE),
-                None,
-            ),
-            (
-                (Char('q'), KeyModifiers::SHIFT),
-                (Char('Q'), KeyModifiers::SHIFT),
-                None,
-            ),
-            (
-                (Char('r'), KeyModifiers::SHIFT),
-                (Char('R'), KeyModifiers::SHIFT),
-                None,
-            ),
-        ];
-        for ((base_code, base_mods), (glyph_code, glyph_mods), expected) in cases {
-            let label = format!("{base_code:?}+{base_mods:?} vs {glyph_code:?}+{glyph_mods:?}");
-            let base = resolve_key_event(base_code, base_mods);
-            let glyph = resolve_key_event(glyph_code, glyph_mods);
-            assert_eq!(
-                base.as_ref().map(|(_, action)| *action),
-                expected,
-                "base+SHIFT: {label}"
-            );
-            assert_eq!(
-                glyph.as_ref().map(|(_, action)| *action),
-                expected,
-                "glyph: {label}"
-            );
-            if let (Some((base_id, _)), Some((glyph_id, _))) = (&base, &glyph) {
-                assert_eq!(base_id, glyph_id, "both must hold the same key: {label}");
-            }
-        }
-    }
-    /// Every plain key must still bind to its documented action after the
-    /// modifier rules were simplified.
-    #[test]
-    fn resolve_key_event_keeps_every_unshifted_key_bound() {
-        use KeyCode::*;
-        let documented = [
-            (Char('q'), Action::Quit),
-            (Esc, Action::Menu),
-            (Char(' '), Action::Spin),
-            (Tab, Action::Axes),
-            (Char('r'), Action::Reset),
-            (Char('d'), Action::Motion(Motion::RollMinus)),
-            (Char('f'), Action::Motion(Motion::RollPlus)),
-            (Char('h'), Action::Motion(Motion::YawLeft)),
-            (Char('='), Action::Motion(Motion::MoveForward)),
-            (Char('-'), Action::Motion(Motion::MoveBack)),
-            (Left, Action::Motion(Motion::YawLeft)),
-        ];
-        for (code, expected) in documented {
-            let (_, action) = resolve_key_event(code, KeyModifiers::NONE)
-                .unwrap_or_else(|| panic!("{code:?} must stay bound"));
-            assert_eq!(action, expected, "{code:?}");
-        }
-    }
-
-    /// Plain `c` and `e` bind nothing; `Ctrl+c` is the quit chord, and
-    /// `Ctrl+e` is not a substitute for it.
-    #[test]
-    fn unbound_letters_stay_unbound() {
-        use KeyCode::*;
-        for (code, mods) in [
-            (Char('c'), KeyModifiers::NONE),
-            (Char('e'), KeyModifiers::NONE),
-            (Char('e'), KeyModifiers::CONTROL),
-            (Char('y'), KeyModifiers::NONE),
-        ] {
-            assert!(
-                resolve_key_event(code, mods).is_none(),
-                "{code:?}+{mods:?} must bind nothing"
-            );
-        }
-        assert!(matches!(
-            resolve_key_event(Char('c'), KeyModifiers::CONTROL),
-            Some((_, Action::Quit))
-        ));
-    }
-
     /// Regression: `held` used to be keyed by Motion, so a modifier change
     /// between Press and Release made key-up resolve to a *different* motion —
     /// the original one kept running, and with key-up reporting there is no
@@ -4002,7 +3164,7 @@ mod tests {
     #[test]
     fn shift_change_mid_hold_cannot_leave_a_hold_running() {
         let mut app = app_with("cube");
-        app.release_seen = true;
+        app.input.set_key_up(true);
         // Press `h` (rotate), then Shift: the Repeat now spells "move", but it
         // is still the same key, so there is exactly one hold — and a Repeat
         // never re-samples the motion it started with.
@@ -4013,14 +3175,21 @@ mod tests {
         let mut shifted = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::SHIFT);
         shifted.kind = KeyEventKind::Repeat;
         app.handle_input(Event::Key(shifted));
-        assert_eq!(app.held.len(), 1, "one key must not fork into two motions");
-        assert_eq!(app.held[&KeyCode::Char('h')], Motion::YawLeft);
+        assert_eq!(
+            app.input.hold_count(),
+            1,
+            "one key must not fork into two motions"
+        );
+        assert_eq!(
+            app.input.held_motion(KeyCode::Char('h')),
+            Some(Motion::YawLeft)
+        );
         // Release the key while Shift is still down: key-up carries SHIFT and
         // must still find the hold.
         let mut release = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::SHIFT);
         release.kind = KeyEventKind::Release;
         app.handle_input(Event::Key(release));
-        assert!(app.held.is_empty(), "shifted key-up must stop the hold");
+        assert!(!app.input.is_active(), "shifted key-up must stop the hold");
 
         // The other order: press Shift+h (move), release Shift first, and the
         // key-up arrives WITHOUT SHIFT. Matching on the motion here is what
@@ -4029,10 +3198,16 @@ mod tests {
             KeyCode::Char('h'),
             KeyModifiers::SHIFT,
         )));
-        assert_eq!(app.held[&KeyCode::Char('h')], Motion::MoveLeft);
+        assert_eq!(
+            app.input.held_motion(KeyCode::Char('h')),
+            Some(Motion::MoveLeft)
+        );
         let mut release = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         app.handle_input(Event::Key(release));
-        assert!(app.held.is_empty(), "unshifted key-up must stop the hold");
+        assert!(
+            !app.input.is_active(),
+            "unshifted key-up must stop the hold"
+        );
     }
 }

@@ -146,6 +146,16 @@ forces the help page to follow. The bar carries no hints: the menu's Key
 Bindings is the only place the viewer lists the chords. The tables below are
 that same list written out for reading.
 
+Motion keys answer on the press. On a terminal that reports key-up (the Kitty
+keyboard protocol), holding a motion key moves continuously until the Release;
+the viewer probes for that support at start-up, so the first press of a session
+behaves like every later one. After 200 ms the hold steps from the slow gear to
+a fixed 2× fast gear; it is one step, not a ramp, and rotation, pan and zoom all
+share it. Releasing resets the next press to the slow gear. A terminal that
+cannot report key-up takes one finite step per press, and its auto-repeat steps
+are scaled by the interval between events, so their steady speed does not follow
+the terminal's repeat setting.
+
 #### Rotate — the world's axes
 
 Left and right read as you see them: the model faces out of the screen, so

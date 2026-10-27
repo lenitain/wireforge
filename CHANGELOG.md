@@ -32,6 +32,11 @@ carried in git on that date.
 
 ### Changed
 
+- Holding a motion key now steps from the slow gear to a fixed 2× fast gear
+  after 200 ms. It is two gears, not continuous acceleration: releasing resets
+  the next press to the slow gear, and rotation, pan and zoom share the same
+  step. Auto-spin is unaffected; legacy terminals keep their event-scaled
+  repeats.
 - The bar carries no key hints: the menu's Key Bindings is the only place the
   chords are listed. On a narrow row the lamps go first, then the readout sheds
   from the right.
@@ -61,8 +66,19 @@ carried in git on that date.
 
 ### Fixed
 
+- The first motion key of a session is continuous on a terminal that reports
+  key-up: the viewer probes for the keyboard protocol at start-up instead of
+  waiting for the first Release, so a cold start no longer turns the first long
+  press into a pause followed by tap-repeat.
+- Idle wake no longer counts the blocked wait as one 100 ms motion frame; a
+  slow frame uses its real elapsed time up to one second.
+- Auto-repeat on a terminal without key-up is scaled by the gap between events,
+  so its speed no longer follows the terminal's repeat rate.
+- A Repeat promotes an already-held key to a continuous hold when key-up support
+  is learned from another key's Release, and a lost Release is bounded by a
+  watchdog instead of moving the model forever.
 - On a terminal that cannot report key-up, a tap is one finite step instead of
-  a one-second drift; holds only start when key-up is actually reported.
+  a one-second drift.
 - `Ctrl+Shift+C` no longer quits (it is a terminal copy shortcut); `Ctrl+C`
   still quits.
 - The key panel's right column starts at the same offset on every row: the

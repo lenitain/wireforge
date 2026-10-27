@@ -27,7 +27,7 @@ use std::{
 };
 use wrfm::WrfmModel;
 use wrfm_raster::Model;
-use wrfm_raster::geometry::{DEFAULT_VFOV, MAX_VFOV};
+use wrfm_raster::geometry::{DEFAULT_VFOV_DEG, MAX_VFOV_DEG};
 
 mod input;
 mod keymap;
@@ -59,10 +59,10 @@ struct Args {
     /// `.wrfm` file to open, or `-` to read from stdin (the default when stdin is
     /// not a terminal). Omit it on a terminal to open an empty canvas.
     file: Option<PathBuf>,
-    /// Vertical field of view in RADIANS (default 0.5; must be > 0 and <= 3).
+    /// Vertical field of view in DEGREES (default 30; must be > 0 and < 180).
     /// The horizontal field follows from the terminal's aspect ratio and is
     /// never clamped — content outside the frustum is simply not drawn.
-    vfov: f64,
+    vfov_deg: f64,
 }
 
 /// The `--help` text, kept close to the conventional layout so a user who
@@ -77,7 +77,7 @@ const USAGE: &str = concat!(
     "          not a terminal). Omit it on a terminal to open an empty canvas\n",
     "\n",
     "Options:\n",
-    "      --vfov <VFOV>  Vertical field of view in RADIANS (default 0.5; must be > 0 and <= 3).\n",
+    "      --vfov <VFOV>  Vertical field of view in DEGREES (default 30; must be > 0 and < 180).\n",
     "                     The horizontal field follows from the terminal's aspect ratio and is\n",
     "                     never clamped — content outside the frustum is simply not drawn\n",
     "  -h, --help         Print help\n",
@@ -91,13 +91,14 @@ fn fail_usage(message: &str) -> ! {
     std::process::exit(2);
 }
 
-/// Parse a `--vfov` value into a finite `f64`. Range validation against
-/// `(0, MAX_VFOV]` happens in [`main`], before any terminal setup.
+/// Parse a `--vfov` value (degrees) into a finite `f64`. Range validation
+/// against `(0, MAX_VFOV_DEG)` happens in [`main`], before any terminal
+/// setup.
 fn parse_vfov(raw: &str) -> f64 {
     match raw.parse::<f64>() {
         Ok(v) if v.is_finite() => v,
         _ => fail_usage(&format!(
-            "invalid value '{raw}' for '--vfov <VFOV>': expected a number in radians"
+            "invalid value '{raw}' for '--vfov <VFOV>': expected a number in degrees"
         )),
     }
 }
@@ -111,7 +112,7 @@ impl Args {
     fn parse() -> Args {
         let mut args = Args {
             file: None,
-            vfov: DEFAULT_VFOV,
+            vfov_deg: DEFAULT_VFOV_DEG,
         };
         let mut argv = std::env::args_os().skip(1);
         while let Some(arg) = argv.next() {
@@ -135,13 +136,13 @@ impl Args {
                     }
                 }
                 _ if text.starts_with("--vfov=") => {
-                    args.vfov = parse_vfov(&text["--vfov=".len()..]);
+                    args.vfov_deg = parse_vfov(&text["--vfov=".len()..]);
                 }
                 "--vfov" => {
                     let Some(value) = argv.next() else {
                         fail_usage("a value is required for '--vfov <VFOV>' but none was supplied");
                     };
-                    args.vfov = parse_vfov(&value.to_string_lossy());
+                    args.vfov_deg = parse_vfov(&value.to_string_lossy());
                 }
                 // A lone `-` is the stdin sentinel, not an option.
                 _ if text.starts_with('-') && text != "-" => {
@@ -1509,13 +1510,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     }));
     let args = Args::parse();
     // Validate `--vfov` BEFORE any terminal setup: a bad value must fail
-    // fast on a sane screen, never inside raw mode. The valid range is
-    // (0, MAX_VFOV]; 0 would divide by zero and > MAX_VFOV makes the
-    // projection degenerate.
-    if !(args.vfov > 0.0 && args.vfov <= MAX_VFOV) {
+    // fast on a sane screen, never inside raw mode. The value is degrees (the
+    // surface unit) and the valid range is (0, MAX_VFOV_DEG): 0 would divide
+    // by zero and 180° makes the projection degenerate.
+    if !(args.vfov_deg > 0.0 && args.vfov_deg < MAX_VFOV_DEG) {
         eprintln!(
-            "--vfov must be > 0 and <= {MAX_VFOV} radians, got {}",
-            args.vfov
+            "--vfov must be > 0 and < {MAX_VFOV_DEG} degrees, got {}",
+            args.vfov_deg
         );
         std::process::exit(1);
     }
@@ -1637,7 +1638,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // L2 engine + viewer state.
     let (current_model, model_name) = loaded;
     let (cols, rows) = crossterm::terminal::size()?;
-    let mut app = App::new(current_model, model_name, strip_label, args.vfov);
+    let mut app = App::new(
+        current_model,
+        model_name,
+        strip_label,
+        args.vfov_deg.to_radians(),
+    );
     app.input.set_key_up(reports_key_up);
     let mut engine = Engine::new(cols as usize, rows as usize);
     let mut timers = TimerScheduler::new();
@@ -1749,6 +1755,7 @@ mod tests {
     use crate::motion::Motion;
     use crate::motion::TAP_PAN;
     use std::fs;
+    use wrfm_raster::geometry::DEFAULT_VFOV;
 
     /// Write `content` to a uniquely named temp file and return its path.
     fn temp_file(name: &str, content: &str) -> PathBuf {

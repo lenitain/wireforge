@@ -2421,17 +2421,17 @@ fn render_stderr_stays_empty_for_warn_and_broken() {
 }
 
 // ---------------------------------------------------------------------------
-// --vfov (vertical field of view, RADIANS)
+// --vfov (vertical field of view, DEGREES)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn render_and_view_reject_out_of_range_vfov() {
-    // The valid range is (0, 3] radians; anything else is a usage error (3)
-    // on BOTH camera subcommands.
+    // The valid range is (0, 180) degrees, decimals included; anything else
+    // is a usage error (3) on BOTH camera subcommands.
     let dir = scratch("vfov_out_of_range");
     let path = write(&dir, "cube.wrfm", CUBE);
     for cmd in ["render", "view"] {
-        for bad in ["0", "-1", "3.01"] {
+        for bad in ["0", "-1", "180", "180.5"] {
             // `--vfov=-1` (equals form): a space-separated `-1` would be
             // parsed as a flag by clap, not as this option's value.
             let out = run(&[cmd, path.to_str().unwrap(), &format!("--vfov={bad}")]);
@@ -2448,28 +2448,30 @@ fn render_and_view_reject_out_of_range_vfov() {
             );
         }
     }
-    // The boundary itself is accepted: 3 radians on both subcommands.
-    let out = run(&[
-        "render",
-        path.to_str().unwrap(),
-        "--vfov",
-        "3",
-        "--views",
-        "front",
-    ]);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "render --vfov 3: stderr {}",
-        stderr(&out)
-    );
-    let out = run(&["view", path.to_str().unwrap(), "--vfov", "3"]);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "view --vfov 3: stderr {}",
-        stderr(&out)
-    );
+    // Just inside the open range is accepted — decimals included.
+    for good in ["0.1", "29.5", "179.9"] {
+        let out = run(&[
+            "render",
+            path.to_str().unwrap(),
+            "--vfov",
+            good,
+            "--views",
+            "front",
+        ]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "render --vfov {good}: stderr {}",
+            stderr(&out)
+        );
+        let out = run(&["view", path.to_str().unwrap(), "--vfov", good]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "view --vfov {good}: stderr {}",
+            stderr(&out)
+        );
+    }
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -2486,11 +2488,11 @@ fn view_vfov_widens_the_auto_camera_distance() {
             .as_f64()
             .expect("view.dist")
     };
-    let near = dist_for("2.0");
-    let far = dist_for("0.5");
+    let near = dist_for("60");
+    let far = dist_for("20");
     assert!(
         far > near,
-        "vfov 0.5 must frame farther than vfov 2.0: {far} vs {near}"
+        "vfov 20° must frame farther than vfov 60°: {far} vs {near}"
     );
     fs::remove_dir_all(&dir).ok();
 }

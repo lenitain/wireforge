@@ -3,17 +3,22 @@
 
 use crate::Model;
 
-/// Default vertical field of view in RADIANS — the wireforge fork's
-/// projection. Vertical is the ONE authoritative axis: the horizontal field
-/// follows from the canvas aspect ratio and is never clamped (wireforge
-/// never needs to fill the screen — content outside the frustum is simply
-/// not drawn).
-pub const DEFAULT_VFOV: f64 = 0.5;
+/// Default vertical field of view in DEGREES — the unit the command line and
+/// the TUI readout speak. Vertical is the ONE authoritative axis: the
+/// horizontal field follows from the canvas aspect ratio and is never clamped
+/// (wireforge never needs to fill the screen — content outside the frustum is
+/// simply not drawn).
+pub const DEFAULT_VFOV_DEG: f64 = 30.0;
 
-/// Upper bound on a caller-supplied vertical FOV (radians): ~172°, wide
-/// enough for any sane view and past which `tan(vfov/2)` explodes. CLIs
-/// reject values outside `(0, MAX_VFOV]` as usage errors.
-pub const MAX_VFOV: f64 = 3.0;
+/// [`DEFAULT_VFOV_DEG`] in RADIANS — the unit the projection math speaks.
+/// Degrees are a surface unit (CLI parameters, TUI readouts) and are
+/// converted to radians at that boundary; everything below is radians.
+pub const DEFAULT_VFOV: f64 = DEFAULT_VFOV_DEG * std::f64::consts::PI / 180.0;
+
+/// Upper bound (exclusive) on a caller-supplied vertical FOV in DEGREES: at
+/// 180° `tan(vfov / 2)` explodes. CLIs reject values outside
+/// `(0, MAX_VFOV_DEG)` as usage errors.
+pub const MAX_VFOV_DEG: f64 = 180.0;
 
 /// Auto-fit headroom: at the fit distance, the model's geometric-mean extent
 /// projects to `1 / (2 * FIT_MARGIN)` of canvas height (half on each side of
@@ -248,7 +253,7 @@ mod tests {
             MIN_EXTENT,
             "an empty model must report MIN_EXTENT, never NaN"
         );
-        for vfov in [0.5, DEFAULT_VFOV, MAX_VFOV] {
+        for vfov in [0.5, DEFAULT_VFOV, 2.5] {
             let d = auto_dist(&empty, vfov);
             assert!(
                 d.is_finite() && d > 0.0,

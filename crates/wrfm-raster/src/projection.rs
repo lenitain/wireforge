@@ -19,7 +19,8 @@ use crate::geometry::Mat3;
 pub const NEAR: f64 = 0.1;
 
 /// Focal length in canvas units for a dot-grid height of `px_h` at a
-/// vertical FOV of `vfov` (radians): `f = (px_h / 2) / tan(vfov / 2)`.
+/// vertical FOV of `vfov` (radians): `f = (px_h / 2) / tan(vfov / 2)`. The
+/// CLI parameter and the TUI readout speak degrees; convert at that boundary.
 ///
 /// `px_h` is the grid height in DOTS (character rows x 4 for braille). The
 /// vertical FOV is the one authoritative axis; the horizontal field of view

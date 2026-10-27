@@ -143,9 +143,10 @@ pub struct RenderOptions {
     pub region: Option<[f64; 4]>,
     /// `--fit content`: crop each frame to the projected content bounding box, so the model fills the canvas. Applied per view AFTER the camera transform, so each view's content fills its canvas.
     pub fit_content: bool,
-    /// Vertical field of view in RADIANS (`--vfov`): the one authoritative
-    /// FOV axis; the horizontal field follows from the canvas aspect ratio
-    /// and is never clamped.
+    /// Vertical field of view in RADIANS (the internal unit; `--vfov` speaks
+    /// degrees and the boundary converts): the one authoritative FOV axis; the
+    /// horizontal field follows from the canvas aspect ratio and is never
+    /// clamped.
     pub vfov: f64,
 }
 

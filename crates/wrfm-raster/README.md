@@ -11,8 +11,8 @@ across centered, region-zoom and arbitrary windows.
 
 - `model` — the `Model` vertex/edge input every entry point takes
 - `geometry` — rotations (`rot_x` / `rot_y` / `rot_z`, `rot_axis`, `world_rot`),
-  `bounds`, `model_extent`, `auto_dist`, plus `DEFAULT_VFOV` / `MAX_VFOV` /
-  `FIT_MARGIN`
+  `bounds`, `model_extent`, `auto_dist`, plus `DEFAULT_VFOV_DEG` /
+  `DEFAULT_VFOV` / `MAX_VFOV_DEG` / `FIT_MARGIN`
 - `projection` — `Camera` / `CameraF32`, `focal`, vertex → canvas projection
 - `raster` — `Viewport`, `rasterize_line` / `rasterize_camera_line` (clip + Bresenham), `clip_near`, `dots_to_lines`
 

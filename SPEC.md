@@ -118,9 +118,11 @@ wrfm edit model.wrfm --extract-group cabinet | wrfm transform - --scale 2 | wire
 
 ### Field of view
 
-`--vfov N` sets the vertical field of view in **radians** (default 0.5, valid
-range (0, 3]). It is fixed for the session — it feeds the focal length and
-the auto-fit camera distance at start-up.
+`--vfov N` sets the vertical field of view in **degrees** (default 30, valid
+range (0, 180), decimals welcome). It is fixed for the session — it feeds the
+focal length and the auto-fit camera distance at start-up. Degrees are the
+surface unit: the command line and the camera readout speak degrees, the
+projection math works in radians, and the boundary converts.
 
 The vertical axis is the only one you set. The horizontal field of view
 follows from the terminal's aspect ratio and is **never clamped**: unlike a
@@ -129,8 +131,8 @@ extreme aspect ratios), wireforge does not need to fill the screen — content
 outside the frustum is simply not drawn.
 
 ```bash
-wireforge model.wrfm --vfov 0.5   # narrow: zooms out (auto-fit frames farther)
-wireforge model.wrfm --vfov 2.0   # wide: zooms in
+wireforge model.wrfm --vfov 20   # narrow: zooms out (auto-fit frames farther)
+wireforge model.wrfm --vfov 60   # wide: zooms in
 ```
 
 ### Key bindings

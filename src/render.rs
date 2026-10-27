@@ -24,79 +24,168 @@ const PARALLEL_EDGE_THRESHOLD: usize = 50_000;
 /// The f32 batch-projection path is used above this many vertices.
 const F32_PROJECT_THRESHOLD: usize = 4_096;
 
-/// One slot of the viewer's 16-color palette, usable as a foreground *or* a
-/// background: the two uses differ only by the ANSI `30↔40` / `90↔100` offset,
-/// so one enum covers both.
+/// One semantic colour slot in the viewer's palette. A slot is resolved to an
+/// actual [`Color`] by [`Ink::color`] when a frame is presented, so the
+/// rasterizer and the HUD only ever deal in roles — never in "green" or
+/// "cyan".
 ///
-/// The slots are named after the ANSI color a terminal palette entry holds.
-/// Wireforge draws in the *theme's* colors, so the theme decides the actual
-/// RGB: on the everforest palette these names were chosen against, `Green` is
-/// `#A7C080` and `Grey` is `#5d686f`.
+/// The numeric value is the packed-cell byte, so the order is an ABI for the
+/// screen's `u64` cells: append new roles, never renumber the existing ones.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Ink {
-    /// The terminal's own foreground / background: no SGR color is set.
+    /// The terminal's own foreground / background: no SGR colour is set.
     Default = 0,
-    Cyan = 1,
-    Red = 2,
-    Yellow = 3,
-    LightBlue = 4,
-    /// ANSI 0 — the statusline's dark block.
-    Black = 5,
-    /// ANSI 2 — the accent, worn by the statusline's leading pill.
-    Green = 6,
-    /// ANSI 8 (bright black) — the statusline's lighter block.
-    Grey = 7,
-    /// ANSI 7 — body text.
-    White = 8,
+    /// The wireframe edges.
+    Model = 1,
+    /// Body text on the chrome.
+    Foreground = 2,
+    /// Secondary text: labels, separators, the panel footer.
+    Muted = 3,
+    /// The accent: the name pill, lit lamps, hint keys, headings.
+    Accent = 4,
+    /// Text drawn on the accent ground.
+    OnAccent = 5,
+    /// Secondary highlight: the key chords of the help panel. It is a bright
+    /// slot on purpose: the chords name the keys the panel documents and must
+    /// not read as decoration.
+    AccentSoft = 6,
+    /// The ground of the bar.
+    Surface = 7,
+    /// The ground the state lamps sit on: the bar's one lighter block, the
+    /// lualine-style section beside the name pill.
+    Lamp = 8,
+    /// Panel borders.
+    Border = 9,
+    AxisX = 10,
+    AxisY = 11,
+    AxisZ = 12,
 }
+
+/// Every non-default slot, in the order [`ink_idx`] tries them.
+///
+/// Structural colours come first so a shared colour resolves to the role the
+/// HUD chrome uses (the bar ground, the axes) rather than to a decorative role that happens to be the same ANSI slot. The emitted SGR is
+/// identical either way; this keeps the packed slots stable for the tests that
+/// read composition through them.
+const INKS: [Ink; 12] = [
+    Ink::Surface,
+    Ink::Lamp,
+    Ink::Border,
+    Ink::Model,
+    Ink::AxisX,
+    Ink::AxisY,
+    Ink::AxisZ,
+    Ink::Foreground,
+    Ink::Muted,
+    Ink::Accent,
+    Ink::OnAccent,
+    Ink::AccentSoft,
+];
 
 impl Ink {
     /// Recover the [`Ink`] from a packed-cell ink byte.
     pub fn from_u8(v: u8) -> Ink {
         match v {
-            1 => Ink::Cyan,
-            2 => Ink::Red,
-            3 => Ink::Yellow,
-            4 => Ink::LightBlue,
-            5 => Ink::Black,
-            6 => Ink::Green,
-            7 => Ink::Grey,
-            8 => Ink::White,
+            1 => Ink::Model,
+            2 => Ink::Foreground,
+            3 => Ink::Muted,
+            4 => Ink::Accent,
+            8 => Ink::Lamp,
+            5 => Ink::OnAccent,
+            6 => Ink::AccentSoft,
+            7 => Ink::Surface,
+            9 => Ink::Border,
+            10 => Ink::AxisX,
+            11 => Ink::AxisY,
+            12 => Ink::AxisZ,
             _ => Ink::Default,
         }
     }
 
-    /// The SGR color parameter for this slot, or `None` when it is
-    /// [`Ink::Default`] and the terminal's own color should stand.
-    fn code(self) -> Option<u8> {
+    /// The colour this slot is drawn in: the terminal's own palette.
+    pub fn color(self) -> Color {
         match self {
-            Ink::Default => None,
-            Ink::Black => Some(30),
-            Ink::Red => Some(31),
-            Ink::Green => Some(32),
-            Ink::Yellow => Some(33),
-            Ink::Cyan => Some(36),
-            Ink::White => Some(37),
-            Ink::Grey => Some(90),
-            Ink::LightBlue => Some(94),
+            Ink::Default => Color::Reset,
+            Ink::Model => Color::Cyan,
+            Ink::Foreground => Color::White,
+            Ink::Muted => Color::DarkGray,
+            Ink::Accent => Color::Green,
+            Ink::OnAccent => Color::Black,
+            Ink::AccentSoft => Color::LightBlue,
+            Ink::Surface => Color::Black,
+            Ink::Lamp => Color::DarkGray,
+            Ink::Border => Color::White,
+            Ink::AxisX => Color::Red,
+            Ink::AxisY => Color::Yellow,
+            Ink::AxisZ => Color::LightBlue,
         }
     }
 }
 
-/// Map a ratatui `Color` to the palette slot holding it. Colors outside the
-/// palette (including `Color::Reset`) fall back to the terminal default.
+/// Map a ratatui `Color` back to the palette slot that names it.
+///
+/// The HUD is built with ordinary ratatui widgets and `Color` values, then
+/// blitted into the packed screen; this is where those colours become slots.
+/// When two roles share a colour the first match wins, which is harmless: the
+/// emitted SGR is the same either way. Anything outside the palette falls back
+/// to the terminal default.
 pub fn ink_idx(c: Color) -> u8 {
-    match c {
-        Color::Cyan => Ink::Cyan as u8,
-        Color::Red => Ink::Red as u8,
-        Color::Yellow => Ink::Yellow as u8,
-        Color::LightBlue => Ink::LightBlue as u8,
-        Color::Black => Ink::Black as u8,
-        Color::Green => Ink::Green as u8,
-        Color::DarkGray => Ink::Grey as u8,
-        Color::White => Ink::White as u8,
-        _ => Ink::Default as u8,
+    if c == Color::Reset {
+        return Ink::Default as u8;
+    }
+    INKS.iter()
+        .find(|ink| ink.color() == c)
+        .map_or(Ink::Default as u8, |ink| *ink as u8)
+}
+
+/// Append a `;N` parameter for a standard/bright ANSI colour.
+fn push_code(out: &mut Vec<u8>, code: u8) {
+    out.push(b';');
+    Screen::push_usize(out, code as usize);
+}
+
+/// Append the SGR parameter selecting `color`, or nothing for the terminal
+/// default. `background` selects the 40s/100s (or 48/38-extended) range.
+fn push_color(out: &mut Vec<u8>, color: Color, background: bool) {
+    let base = if background { 40 } else { 30 };
+    let bright = if background { 100 } else { 90 };
+    match color {
+        Color::Reset => {}
+        Color::Black => push_code(out, base),
+        Color::Red => push_code(out, base + 1),
+        Color::Green => push_code(out, base + 2),
+        Color::Yellow => push_code(out, base + 3),
+        Color::Blue => push_code(out, base + 4),
+        Color::Magenta => push_code(out, base + 5),
+        Color::Cyan => push_code(out, base + 6),
+        Color::Gray => push_code(out, base + 7),
+        // `Ink::Foreground` is ANSI 37, not the bright white 97, so White
+        // keeps the old slot's byte-for-byte output.
+        Color::White => push_code(out, base + 7),
+        Color::DarkGray => push_code(out, bright),
+        Color::LightRed => push_code(out, bright + 1),
+        Color::LightGreen => push_code(out, bright + 2),
+        Color::LightYellow => push_code(out, bright + 3),
+        Color::LightBlue => push_code(out, bright + 4),
+        Color::LightMagenta => push_code(out, bright + 5),
+        Color::LightCyan => push_code(out, bright + 6),
+        Color::Rgb(r, g, b) => {
+            out.push(b';');
+            out.push(if background { b'4' } else { b'3' });
+            out.extend_from_slice(b"8;2;");
+            Screen::push_usize(out, r as usize);
+            out.push(b';');
+            Screen::push_usize(out, g as usize);
+            out.push(b';');
+            Screen::push_usize(out, b as usize);
+        }
+        Color::Indexed(n) => {
+            out.push(b';');
+            out.push(if background { b'4' } else { b'3' });
+            out.extend_from_slice(b"8;5;");
+            Screen::push_usize(out, n as usize);
+        }
     }
 }
 
@@ -105,14 +194,10 @@ pub fn ink_idx(c: Color) -> u8 {
 /// Always opens with a reset so a cell can never inherit an ink from its
 /// neighbour; when both slots are default that is exactly `ESC[0m`, the
 /// sequence this writer emitted before backgrounds existed.
-fn push_sgr(out: &mut Vec<u8>, fg: Ink, bg: Ink) {
+fn push_sgr(out: &mut Vec<u8>, fg: Color, bg: Color) {
     out.extend_from_slice(b"\x1b[0");
-    // A background slot is its foreground slot's SGR parameter + 10: 30..37
-    // become 40..47, 90..97 become 100..107.
-    for code in [fg.code(), bg.code().map(|c| c + 10)].into_iter().flatten() {
-        out.push(b';');
-        Screen::push_usize(out, code as usize);
-    }
+    push_color(out, fg, false);
+    push_color(out, bg, true);
     out.push(b'm');
 }
 
@@ -124,7 +209,8 @@ pub struct Screen {
     prev: Vec<u64>,
     /// reusable ANSI output buffer
     out: Vec<u8>,
-    /// True after a resize: the next present must clear the whole screen first.
+    /// True after a resize: the next present must clear the whole screen first
+    /// and redraw every non-space cell.
     full_repaint: bool,
 }
 
@@ -216,7 +302,7 @@ impl Screen {
     /// Diff the current frame against the last, write the changed cells as one batch.
     ///
     /// Every frame leaves the terminal's SGR at *defaults* (see the two resets
-    /// below): the last run a frame writes is the statusline, whose ground is a
+    /// below): the last run a frame writes is the bar, whose ground is a
     /// filled background, and a selected background is contagious — any erase
     /// that follows, ours or the terminal's own, paints with it.
     pub fn present<W: Write>(&mut self, out: &mut W) -> std::io::Result<usize> {
@@ -225,7 +311,7 @@ impl Screen {
             // Reset BEFORE erasing. An erase fills with the background the
             // terminal currently has selected (background-colour-erase, the
             // default in xterm and friends), and the frame before this one
-            // ended on the statusline's ground — so clearing in that state
+            // ended on the bar's ground — so clearing in that state
             // would flood the whole screen, canvas included, with the
             // strip's colour instead of blanking it.
             self.out.extend_from_slice(b"\x1b[0m");
@@ -260,7 +346,11 @@ impl Screen {
                     let fg = (cell & 0xff) as u8;
                     let bg = ((cell >> 8) & 0xff) as u8;
                     if (fg, bg) != last {
-                        push_sgr(&mut self.out, Ink::from_u8(fg), Ink::from_u8(bg));
+                        push_sgr(
+                            &mut self.out,
+                            Ink::from_u8(fg).color(),
+                            Ink::from_u8(bg).color(),
+                        );
                         last = (fg, bg);
                     }
                     let ch = char::from_u32((cell >> 16) as u32).unwrap_or(' ');
@@ -479,7 +569,7 @@ impl Rasterizer {
         self.dots.fill(0);
         self.colors.fill(0);
 
-        let cyan = Ink::Cyan as u8;
+        let model_ink = Ink::Model as u8;
         // The camera once per frame: the edges, the axes and the labels all
         // draw through it, and the ROLL it carries is only ever applied here
         // (`Camera::canvas_point`) — a path that draws camera-space points
@@ -488,9 +578,9 @@ impl Rasterizer {
         if model.edges.len() > PARALLEL_EDGE_THRESHOLD {
             // Stage C: parallel rasterization over edge chunks. Each worker
             // paints into its own scratch grid, then the grids are OR-ed into
-            // the resident buffers. All model dots are cyan, so the merge is
-            // order-independent.
-            self.rasterize_edges_par(&model.edges, vp, cyan, view.vfov, &cam);
+            // the resident buffers. All model dots are the same ink, so the
+            // merge is order-independent.
+            self.rasterize_edges_par(&model.edges, vp, model_ink, view.vfov, &cam);
         } else {
             for &(a, b) in &model.edges {
                 if !self.proj_ok[a] && !self.proj_ok[b] {
@@ -501,7 +591,7 @@ impl Rasterizer {
                     self.proj_ok[a],
                     self.proj_cam[b],
                     self.proj_ok[b],
-                    cyan,
+                    model_ink,
                     &cam,
                     focal(px_h as f64, view.vfov),
                     vp,
@@ -530,9 +620,9 @@ impl Rasterizer {
             let origin = cam.camera_space((0.0, 0.0, 0.0));
             let origin_ok = origin[2] > wrfm_raster::projection::NEAR;
             let ends = [
-                ((axis_len, 0.0, 0.0), "X", Ink::Red as u8),
-                ((0.0, axis_len, 0.0), "Y", Ink::Yellow as u8),
-                ((0.0, 0.0, axis_len), "Z", Ink::LightBlue as u8),
+                ((axis_len, 0.0, 0.0), "X", Ink::AxisX as u8),
+                ((0.0, axis_len, 0.0), "Y", Ink::AxisY as u8),
+                ((0.0, 0.0, axis_len), "Z", Ink::AxisZ as u8),
             ];
             debug_assert_eq!(ends.len(), labels.len());
             for (tip, label, color) in ends {
@@ -1282,11 +1372,11 @@ mod tests {
 
     #[test]
     fn screen_present_writes_the_background_with_the_foreground() {
-        // The statusline is drawn on a filled ground, so a cell's SGR has to
+        // The bar is drawn on a filled ground, so a cell's SGR has to
         // carry both inks; the default pair must still collapse to a bare
         // reset, which is what the canvas (all default cells) relies on.
         let mut s = Screen::new(2, 1);
-        s.set(0, 0, 'A', Ink::White as u8, Ink::Green as u8);
+        s.set(0, 0, 'A', Ink::Foreground as u8, Ink::Accent as u8);
         s.set(1, 0, 'B', Ink::Default as u8, Ink::Default as u8);
         let mut out = Vec::new();
         s.present(&mut out).unwrap();
@@ -1303,15 +1393,15 @@ mod tests {
         // Diffs compare the whole cell, so repainting a ground under unchanged
         // text still reaches the terminal.
         let mut s = Screen::new(1, 1);
-        s.set(0, 0, 'A', Ink::White as u8, Ink::Default as u8);
+        s.set(0, 0, 'A', Ink::Foreground as u8, Ink::Default as u8);
         let mut out = Vec::new();
         s.present(&mut out).unwrap();
-        s.set(0, 0, 'A', Ink::White as u8, Ink::Green as u8);
+        s.set(0, 0, 'A', Ink::Foreground as u8, Ink::Accent as u8);
         out.clear();
         assert_eq!(s.present(&mut out).unwrap(), 1, "the ground changed");
         // The render loop redraws every frame; the same ground again is a
         // no-op, so the repaint costs nothing after the first.
-        s.set(0, 0, 'A', Ink::White as u8, Ink::Green as u8);
+        s.set(0, 0, 'A', Ink::Foreground as u8, Ink::Accent as u8);
         out.clear();
         assert_eq!(s.present(&mut out).unwrap(), 0, "and only once");
     }
@@ -1320,8 +1410,8 @@ mod tests {
     fn screen_present_writes_only_changed_cells() {
         let mut s = Screen::new(5, 3);
         let draw = |s: &mut Screen| {
-            s.set(0, 0, 'A', Ink::Cyan as u8, Ink::Default as u8);
-            s.set(4, 2, '⣿', Ink::Red as u8, Ink::Default as u8);
+            s.set(0, 0, 'A', Ink::Model as u8, Ink::Default as u8);
+            s.set(4, 2, '⣿', Ink::AxisX as u8, Ink::Default as u8);
         };
         draw(&mut s);
         let mut out = Vec::new();
@@ -1348,7 +1438,7 @@ mod tests {
         // wiped with ESC[2J, or stale model pixels survive alongside the
         // re-projected model ("two models" after resizing).
         let mut s = Screen::new(4, 2);
-        s.set(0, 0, 'Z', Ink::Yellow as u8, Ink::Default as u8);
+        s.set(0, 0, 'Z', Ink::AxisY as u8, Ink::Default as u8);
         let mut out = Vec::new();
         s.present(&mut out).unwrap();
         s.resize(8, 3);
@@ -1371,11 +1461,11 @@ mod tests {
     #[test]
     fn screen_resize_repaints_fully() {
         let mut s = Screen::new(4, 2);
-        s.set(0, 0, 'Z', Ink::Yellow as u8, Ink::Default as u8);
+        s.set(0, 0, 'Z', Ink::AxisY as u8, Ink::Default as u8);
         let mut out = Vec::new();
         s.present(&mut out).unwrap();
         s.resize(8, 3);
-        s.set(7, 2, 'Q', Ink::Red as u8, Ink::Default as u8);
+        s.set(7, 2, 'Q', Ink::AxisX as u8, Ink::Default as u8);
         out.clear();
         // After a resize the previous frame is all-space, so the single
         // non-space cell is the only change.
@@ -1435,13 +1525,13 @@ mod tests {
 
     #[test]
     fn present_leaves_no_background_selected() {
-        // A frame's last run is the statusline, whose ground is a filled
+        // A frame's last run is the bar, whose ground is a filled
         // background. Leaving it selected hands every later erase — the
         // clear-screen of a resize, the terminal's own fill of the rows a
         // resize exposes — the strip's colour, which then shows up as the
-        // statusline's background flooding the canvas.
+        // bar's background flooding the canvas.
         let mut s = Screen::new(4, 2);
-        s.set(0, 1, 'X', Ink::White as u8, Ink::Black as u8);
+        s.set(0, 1, 'X', Ink::Foreground as u8, Ink::Surface as u8);
         let mut out = Vec::new();
         s.present(&mut out).unwrap();
         assert!(
@@ -1451,7 +1541,7 @@ mod tests {
         );
         // A frame that redraws exactly what is already on the terminal has
         // nothing to write — and so nothing to reset either.
-        s.set(0, 1, 'X', Ink::White as u8, Ink::Black as u8);
+        s.set(0, 1, 'X', Ink::Foreground as u8, Ink::Surface as u8);
         out.clear();
         assert_eq!(s.present(&mut out).unwrap(), 0);
         assert!(out.is_empty(), "an idle frame writes nothing: {out:?}");
@@ -1459,18 +1549,18 @@ mod tests {
 
     #[test]
     fn resize_clear_never_erases_with_a_background_selected() {
-        // Regression: the frame before the resize leaves the statusline's
+        // Regression: the frame before the resize leaves the bar's
         // ground selected, so the resize's ESC[2J would paint the whole
         // screen — canvas included — with it.
         // Both frames go to the SAME stream, exactly as stdout sees them:
         // the clear is emitted by the second frame, but the colours it erases
         // with are the ones the first frame left selected.
         let mut s = Screen::new(4, 2);
-        s.set(0, 1, 'X', Ink::White as u8, Ink::Black as u8);
+        s.set(0, 1, 'X', Ink::Foreground as u8, Ink::Surface as u8);
         let mut out = Vec::new();
         s.present(&mut out).unwrap();
         s.resize(8, 4);
-        s.set(0, 3, 'Y', Ink::Cyan as u8, Ink::Default as u8);
+        s.set(0, 3, 'Y', Ink::Model as u8, Ink::Default as u8);
         s.present(&mut out).unwrap();
         assert!(
             !clears_with_background_selected(&out),
@@ -1513,7 +1603,7 @@ mod tests {
         raster.render(&m, &v, (0, 1, 120, 29), true, e, &mut screen);
 
         // All three axes are on screen, in their own colors.
-        for (axis, color) in [("X", Ink::Red), ("Y", Ink::Yellow), ("Z", Ink::LightBlue)] {
+        for (axis, color) in [("X", Ink::AxisX), ("Y", Ink::AxisY), ("Z", Ink::AxisZ)] {
             assert!(
                 color_rows(&screen, color).is_some(),
                 "{axis} axis must be drawn for an empty model"
@@ -1522,7 +1612,7 @@ mod tests {
         // The cross is sized by the unit scene, not collapsed into one dot:
         // the Y arm is 1.618 world units at the fit distance, which is a
         // substantial part of a 29-row canvas.
-        let (top, bottom) = color_rows(&screen, Ink::Yellow).expect("Y axis");
+        let (top, bottom) = color_rows(&screen, Ink::AxisY).expect("Y axis");
         assert!(
             bottom - top >= 8,
             "the origin cross must have real size, got rows {top}..={bottom}"
@@ -1568,7 +1658,7 @@ mod tests {
         let mut raster = Rasterizer::new();
         raster.resize(120, 29);
         let axis_ink = |screen: &Screen| {
-            [Ink::Red, Ink::Yellow, Ink::LightBlue]
+            [Ink::AxisX, Ink::AxisY, Ink::AxisZ]
                 .into_iter()
                 .map(|ink| count_ink(screen, ink))
                 .sum::<usize>()
@@ -1586,7 +1676,7 @@ mod tests {
                 axis_ink(&screen) > 0,
                 "dist={dist}: the arms in front of the plane must be drawn \
                  (origin depth {origin_depth}, model {} cells)",
-                count_ink(&screen, Ink::Cyan)
+                count_ink(&screen, Ink::Model)
             );
         }
         // Past that point the origin is behind the camera plane: the arms
@@ -1646,7 +1736,7 @@ mod tests {
         let mut screen = Screen::new(120, 30);
         raster.render(&m, &v, (0, 1, 120, 29), false, e, &mut screen);
         assert!(
-            count_ink(&screen, Ink::Cyan) > 0,
+            count_ink(&screen, Ink::Model) > 0,
             "the part of the edge in front of the camera must be drawn"
         );
     }
@@ -1745,7 +1835,7 @@ mod tests {
                     par.proj_ok[a],
                     par.proj_cam[b],
                     par.proj_ok[b],
-                    Ink::Cyan as u8,
+                    Ink::Model as u8,
                     &cam,
                     scale,
                     vp,

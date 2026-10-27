@@ -17,9 +17,12 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Spawn `bin` (with `args`) on a fresh 30x100 pty; returns the child and the
+/// Spawn `bin` (with `args`) on a fresh 30x140 pty; returns the child and the
 /// master side of the pty. stdout/stderr/stdin of the child are the pts, so
 /// the CLI sees a terminal on stdin exactly like an interactive shell.
+///
+/// The row is 140 cells wide so the bar has room for its name pill, both
+/// state lamps and the whole camera readout.
 fn spawn_on_pty(bin: &str, args: &[&str]) -> (Child, std::fs::File) {
     let slave = std::fs::OpenOptions::new()
         .read(true)
@@ -41,7 +44,7 @@ fn spawn_on_pty(bin: &str, args: &[&str]) -> (Child, std::fs::File) {
         .expect("open pts");
     let ws = libc::winsize {
         ws_row: 30,
-        ws_col: 100,
+        ws_col: 140,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -229,20 +232,20 @@ fn no_file_argument_opens_the_empty_space() {
     let text = strip_ansi(&String::from_utf8_lossy(&seen));
     eprintln!("no-args probe: {} bytes of TUI output", seen.len());
     assert!(
-        text.contains("yaw=") && text.contains("distance="),
-        "blank viewer must render its telemetry row, got: {text:?}"
+        text.contains("yaw") && text.contains("zoom"),
+        "blank viewer must render the bar's telemetry, got: {text:?}"
     );
     // ratatui's diff-based present skips spaces and repaints only changed
     // cells, so compare with every space removed: a text cell like "no file"
     // arrives as the fragments "no" and "file".
     let packed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        packed.contains("nofile\u{e0b0}"),
-        "the statusline pill must name the empty state, got: {text:?}"
+        packed.contains("nofile"),
+        "the bar's pill must name the empty state, got: {text:?}"
     );
     assert!(
         !text.contains("Wireforge:"),
-        "the model's name belongs on the statusline, not Row 0: {text:?}"
+        "the viewer must not print a raw debug name: {text:?}"
     );
     // The empty model still draws the space: the origin cross is rasterized
     // as braille dots (`U+2800..=U+28FF`) and carries the X/Y/Z axis labels.
@@ -259,26 +262,34 @@ fn no_file_argument_opens_the_empty_space() {
         "the axes must keep their labels, got: {text:?}"
     );
     eprintln!("no-args probe: {braille} braille cells on the empty scene");
-    // The statusline: the lamps and the everyday chords are on screen, and the
-    // ground under them reached the terminal as a background SGR. Wireforge
-    // paints no background anywhere else, so this is also the end-to-end proof
-    // that a cell's background survives the blit and the diffing writer.
+    // The bar: the state lamps are on screen and no key hint is (Esc opens
+    // the menu), and the ground under them reached the terminal as a
+    // background SGR. The bar is the only background, so this is also the
+    // end-to-end proof that a cell's background survives the blit and the
+    // diffing writer.
     assert!(
         packed.contains("●SPIN") && packed.contains("●AXES"),
-        "the statusline must carry its state lamps, got: {text:?}"
+        "the bar must carry its state lamps, got: {text:?}"
+    );
+    // The unlit lamp is one dot in the bar's own deep ink on the lamps' block
+    // (fg 30 on bg 100), so an off lamp reads as unlit rather than as missing.
+    assert!(
+        seen.windows(11).any(|w| w == b"\x1b[0;30;100m"),
+        "an unlit lamp must paint its deep ink, got {} bytes",
+        seen.len()
     );
     assert!(
-        packed.contains("?help") && packed.contains("qquit"),
-        "the statusline must carry the everyday chords, got: {text:?}"
+        !packed.contains("Escmenu") && !packed.contains("qquit"),
+        "the bar must carry no key hints, got: {text:?}"
     );
     assert!(
         seen.windows(10).any(|w| w == b"\x1b[0;30;42m"),
-        "the name pill must paint its accent ground, got {} bytes",
+        "the bar's pill must paint its accent ground, got {} bytes",
         seen.len()
     );
     assert!(
         seen.windows(7).any(|w| w == b"\x1b[0;40m"),
-        "the strip must paint its own ground, got {} bytes",
+        "the bar must paint its own ground, got {} bytes",
         seen.len()
     );
     assert!(
@@ -419,7 +430,7 @@ fn sigwinch_delivers_resize_event() {
     let _ = child.wait();
     // The repaint must wipe the OLD size's pixels first (ESC[2J), otherwise
     // stale model pixels survive next to the re-projected model — and it must
-    // erase at DEFAULT colours: the frame before it ends on the statusline's
+    // erase at DEFAULT colours: the frame before it ends on the bar's
     // ground, so an ESC[2J issued with that background still selected fills
     // the whole screen with it (background-colour-erase) and the strip's
     // colour floods the canvas.
@@ -440,7 +451,7 @@ fn sigwinch_delivers_resize_event() {
     );
     assert!(
         !clear_leak,
-        "ESC[2J must erase at default colours, never with the statusline's \
+        "ESC[2J must erase at default colours, never with the bar's \
          background selected (it would flood the canvas)"
     );
     assert!(

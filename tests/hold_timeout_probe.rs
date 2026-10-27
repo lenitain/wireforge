@@ -1,7 +1,8 @@
-//! Integration probe for held keys on a terminal that never reports key-up:
+//! Integration probe for motion keys on a terminal that never reports key-up:
 //! the pty here is dumb, so it cannot answer the kitty keyboard protocol and
-//! the app only ever receives Press events. A held motion key must still stop
-//! by itself (hold timeout) instead of drifting forever at 100% CPU.
+//! the app only ever receives Press events. A press must be one finite step
+//! (never a hold that drifts on after the terminal goes quiet), so the app
+//! repaints and then settles instead of spinning at 100% CPU.
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -47,7 +48,7 @@ fn drain_until_quiet(
 }
 
 #[test]
-fn held_key_without_release_stops_by_itself() {
+fn press_without_release_is_a_finite_step() {
     let bin = env!("CARGO_BIN_EXE_wireforge");
     let slave = std::fs::OpenOptions::new()
         .read(true)
@@ -119,9 +120,9 @@ fn held_key_without_release_stops_by_itself() {
     // One press, no key-up: the pty can never report a Release.
     master.write_all(b"h").expect("write key press");
 
-    // The hold must expire on its own, so the output settles again before the
-    // deadline. Without the timeout the model keeps drifting and the app keeps
-    // repainting forever, so `quiet` never turns true.
+    // A press without key-up reporting is one finite step, so the output
+    // settles again before the deadline. A hold that leaked out of a legacy
+    // press would keep repainting, and `quiet` would never turn true.
     let (motion, quiet) = drain_until_quiet(
         &mut master,
         &mut buf,
@@ -131,13 +132,13 @@ fn held_key_without_release_stops_by_itself() {
     set_nonblock(master.as_raw_fd(), false);
     let _ = child.kill();
     let _ = child.wait();
-    eprintln!("hold probe: repaint bytes after the press = {motion}, quiet = {quiet}");
+    eprintln!("legacy press probe: repaint bytes after the press = {motion}, quiet = {quiet}");
     assert!(
         motion > 0,
         "the press must move the model at least once (input handling broken)"
     );
     assert!(
         quiet,
-        "a held key with no Release must stop by itself (stuck motion / 100% CPU)"
+        "a press with no Release must be one finite step (stuck motion / 100% CPU)"
     );
 }

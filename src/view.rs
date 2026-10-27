@@ -82,12 +82,6 @@ impl ViewState {
         self.yaw += d;
     }
 
-    /// Pitch the model around the world X axis.
-    pub fn add_pitch(&mut self, d: f64) {
-        self.rot = mat_mul(rot_x(d), self.rot);
-        self.pitch += d;
-    }
-
     /// Yaw the model around its own (local) Y axis: `add_yaw` with the step
     /// post-multiplied instead of pre-multiplied, so the axis rides with the
     /// model instead of staying anchored to the world. The direction is the
@@ -96,6 +90,12 @@ impl ViewState {
     pub fn add_yaw_local(&mut self, d: f64) {
         self.rot = mat_mul(self.rot, rot_y(d));
         self.yaw += d;
+    }
+
+    /// Pitch the model around the world X axis.
+    pub fn add_pitch(&mut self, d: f64) {
+        self.rot = mat_mul(rot_x(d), self.rot);
+        self.pitch += d;
     }
 
     /// Pitch the model around its own (local) X axis: `add_pitch` with the

@@ -19,8 +19,9 @@ or `UnsupportedVersion` (§8).
 ## 1. Scope
 
 A `.wrfm` file represents one 3D wireframe model: an ordered list of vertices
-in ℝ³ and an unordered set of edges between them, optionally partitioned into
-named sections. The format is plain text, line-oriented, UTF-8 encoded.
+in ℝ³ and an ordered list of edges between them (each edge an unordered pair
+of indices), optionally partitioned into named sections. The format is plain
+text, line-oriented, UTF-8 encoded.
 
 The format does **not** prescribe:
 

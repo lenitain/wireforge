@@ -16,10 +16,11 @@ EBNF grammar, error variants, and canonical output form, see the spec.
 ## Library overview
 
 `WrfmModel` is a parsed v2 model: a display `name`, an ordered list of
-vertices, an unordered set of edges between them (both global), the
-parsed format version (`2`), and an optional list of named groups over
-the global vertex list. The model is the contract between the file on
-disk and every consumer (viewer, CLI, third-party tool).
+vertices, an ordered list of edges between them (each edge an unordered pair
+of indices; both lists global), the parsed format version (`2`), and an
+optional list of named groups over the global vertex list. The model is the
+contract between the file on disk and every consumer (viewer, CLI,
+third-party tool).
 
 ```rust
 use wrfm::{Group, WrfmModel};

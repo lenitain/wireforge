@@ -151,12 +151,16 @@ that same list written out for reading.
 Motion keys answer on the press. On a terminal that reports key-up (the Kitty
 keyboard protocol), holding a motion key moves continuously until the Release;
 the viewer probes for that support at start-up, so the first press of a session
-behaves like every later one. After 200 ms the hold steps from the slow gear to
-a fixed 2× fast gear; it is one step, not a ramp, and rotation, pan and zoom all
-share it. Releasing resets the next press to the slow gear. A terminal that
-cannot report key-up takes one finite step per press, and its auto-repeat steps
-are scaled by the interval between events, so their steady speed does not follow
-the terminal's repeat setting.
+starts a hold. After 200 ms the hold steps from the slow gear to a fixed 2× fast
+gear; it is one step, not a ramp, and rotation, pan and zoom all share it.
+Releasing resets the next press to the slow gear. A terminal that cannot report
+key-up has no hold: every Press and every auto-repeat it sends is one finite
+step, so the cadence follows that terminal's repeat setting. A Release from any
+key proves key-up support, so a terminal whose probe was hidden starts holding
+from its next event. A duplicate Press of a held key is a new press: it taps
+and restarts the hold, which also re-syncs a Release the terminal lost.
+Release, FocusLost, and the modal overlays are the only stops; the viewer never
+times a hold out.
 
 #### Rotate — the world's axes
 

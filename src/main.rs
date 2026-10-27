@@ -937,8 +937,8 @@ struct App {
     /// model name is only the file stem; `None` shows the model name.
     strip_label: Option<String>,
     view: ViewState,
-    /// Keys that are down and moving the view, plus the key-up capability and
-    /// the legacy repeat clocks. All motion-input state lives here.
+    /// Keys that are down and moving the view, plus what the terminal has
+    /// proved it can report. All motion-input state lives here.
     input: MotionInput,
     auto_spin: bool,
     overlay: Overlay,
@@ -990,8 +990,8 @@ impl App {
         self.speed
     }
 
-    /// Drop every motion hold and legacy repeat clock. FocusLost and the modal
-    /// overlays use this; the key-up capability survives.
+    /// Drop every motion hold. FocusLost and the modal overlays use this; the
+    /// key-up capability survives.
     fn clear_holds(&mut self) {
         if self.input.clear() {
             self.dirty = true;
@@ -1104,7 +1104,6 @@ impl App {
     /// Open the key reference from the menu. It is modal: Esc/Enter goes back
     /// to the hub, and the model does not react behind the panel.
     fn open_help(&mut self) {
-        self.clear_holds();
         self.overlay = Overlay::Help;
         self.dirty = true;
     }
@@ -1112,7 +1111,6 @@ impl App {
     /// Open the About panel. It is always reached through the menu, so it
     /// returns there on Esc/Enter.
     fn open_about(&mut self) {
-        self.clear_holds();
         self.overlay = Overlay::About;
         self.dirty = true;
     }
@@ -1133,9 +1131,6 @@ impl App {
         let Event::Key(key) = ev else {
             return false;
         };
-        // Any key event proves the keyboard is alive; the watchdog only cares
-        // about silence, so UI keys refresh it too.
-        self.input.note_key(at);
         // A Release is direct evidence that the terminal reports key-up. It is
         // matched by IDENTITY because it may carry different modifiers than
         // the Press (release Shift before `h` and SHIFT is gone). A Release is
@@ -1203,9 +1198,9 @@ impl App {
         self.handle_input_at(ev, Instant::now())
     }
 
-    /// Advance every live hold by one frame. Release (kitty protocol) and
-    /// FocusLost are the normal stops; the watchdog is the backstop for a
-    /// Release that never arrives.
+    /// Advance every live hold by one frame. Release, FocusLost, and the modal
+    /// overlays are the only stops: a key-up terminal is trusted, and a
+    /// terminal without key-up never creates a hold.
     fn advance_input(&mut self, now: Instant, dt: f64) {
         let speed = self.translation_speed();
         if self.input.advance(now, dt, &mut self.view, speed) {
@@ -1259,16 +1254,74 @@ impl Engine {
     }
 }
 
-/// One terminal event and the instant the input thread read it. The timestamp
-/// gives legacy auto-repeat its real gap even when a frame stall lets several
-/// events queue before the loop drains them.
-struct InputEvent {
-    at: Instant,
-    event: Event,
+/// One message from the input thread: a timestamped terminal event, or the
+/// error that ended the input stream. The timestamp lets a hold start at the
+/// instant the event arrived even when a frame stall delayed its handling.
+enum InputMessage {
+    Event { at: Instant, event: Event },
+    Failed(io::Error),
+}
+
+/// The session's only continuous crossterm reader. It blocks on the tty and
+/// hands events to the loop; when reading fails it reports the error and stops,
+/// so the loop can never mistake a dead input source for a quiet keyboard.
+fn spawn_input_thread(tx: Sender<InputMessage>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("wireforge-input".into())
+        .spawn(move || {
+            loop {
+                match event::read() {
+                    Ok(event) => {
+                        let at = Instant::now();
+                        if tx.send(InputMessage::Event { at, event }).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.send(InputMessage::Failed(error));
+                        break;
+                    }
+                }
+            }
+        })?;
+    Ok(())
+}
+
+/// Apply one terminal event. Resize belongs to the loop because it resizes the
+/// rasterizer; every other event belongs to the app. Returns true when the
+/// viewer must quit.
+fn handle_terminal_event(app: &mut App, engine: &mut Engine, event: Event, at: Instant) -> bool {
+    match event {
+        Event::Resize(cols, rows) => {
+            engine.resize(cols as usize, rows as usize);
+            app.dirty = true;
+            false
+        }
+        event => app.handle_input_at(event, at),
+    }
+}
+
+/// The reader thread stopped without reporting why (it only exits after a
+/// read error, or when the loop itself has gone away).
+fn input_thread_stopped() -> io::Error {
+    io::Error::other("wireforge input thread stopped before reporting why")
+}
+
+/// Apply one input-thread message. A reader error is the end of the session,
+/// not a reason to keep polling a dead source.
+fn apply_input_message(
+    app: &mut App,
+    engine: &mut Engine,
+    message: InputMessage,
+) -> io::Result<bool> {
+    match message {
+        InputMessage::Event { at, event } => Ok(handle_terminal_event(app, engine, event, at)),
+        InputMessage::Failed(error) => Err(error),
+    }
 }
 
 /// Ask the terminal whether it implements key-up reporting. Must run before
-/// the input thread starts because the query uses crossterm's internal event
+/// the main loop starts because the query uses crossterm's internal event
 /// reader; it can block for up to two seconds on a terminal that never
 /// answers. A false result only falls back to the observed Release, so a
 /// multiplexer that hides the query does not disable holds forever.
@@ -1276,43 +1329,54 @@ fn terminal_reports_key_up() -> bool {
     crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
 }
 
-/// The only crossterm event reader in the process (blocks on the tty).
-fn spawn_input_thread(tx: Sender<InputEvent>) {
-    let _ = thread::Builder::new()
-        .name("wireforge-input".into())
-        .spawn(move || {
-            while let Ok(event) = event::read() {
-                let at = Instant::now();
-                if tx.send(InputEvent { at, event }).is_err() {
-                    break;
-                }
-            }
-        });
+/// The terminal size in cells. On Unix this reads the window size directly,
+/// without `terminal::size`'s `tput` fallback: a terminal that cannot answer
+/// the ioctl is gone, and that error is what ends an otherwise unresponsive
+/// session. The Windows console has no such ioctl, so it keeps its own size
+/// query.
+#[cfg(unix)]
+fn terminal_size() -> io::Result<(u16, u16)> {
+    let size = crossterm::terminal::window_size()?;
+    Ok((size.columns, size.rows))
 }
 
-/// Fallback resize detection (timer-driven): resize and mark dirty when the terminal size no longer matches the screen.
-fn check_resize(app: &mut App, engine: &mut Engine, timers: &mut TimerScheduler) {
-    if let Ok((cols, rows)) = crossterm::terminal::size() {
-        let (w, h) = engine.screen.size();
-        if cols as usize != w || rows as usize != h {
-            engine.resize(cols as usize, rows as usize);
-            // A resize is a visual change: the dirty flag makes the idle
-            // branch repaint right after this timer fire.
-            app.dirty = true;
-        }
+#[cfg(not(unix))]
+fn terminal_size() -> io::Result<(u16, u16)> {
+    crossterm::terminal::size()
+}
+
+/// Fallback resize detection (timer-driven): resize and mark dirty when the
+/// terminal size no longer matches the screen. The size read is also the
+/// terminal's health check: once it fails, there is no tty left to drive, so
+/// the error ends the session instead of leaving an unresponsive loop behind.
+fn check_resize(app: &mut App, engine: &mut Engine, timers: &mut TimerScheduler) -> io::Result<()> {
+    let (cols, rows) = terminal_size()?;
+    let (w, h) = engine.screen.size();
+    if cols as usize != w || rows as usize != h {
+        engine.resize(cols as usize, rows as usize);
+        // A resize is a visual change: the dirty flag makes the idle branch
+        // repaint right after this timer fire.
+        app.dirty = true;
     }
     timers.schedule(TimerId::ResizeCheck, Instant::now() + RESIZE_CHECK_INTERVAL);
+    Ok(())
 }
 
 /// Fire every timer due at `now` through its dedicated handler. Called from
 /// both loop modes — and after each idle event, so a steady event stream can
 /// never postpone a due timer.
-fn fire_due_timers(app: &mut App, engine: &mut Engine, timers: &mut TimerScheduler, now: Instant) {
+fn fire_due_timers(
+    app: &mut App,
+    engine: &mut Engine,
+    timers: &mut TimerScheduler,
+    now: Instant,
+) -> io::Result<()> {
     for id in timers.fire_due(now) {
         match id {
-            TimerId::ResizeCheck => check_resize(app, engine, timers),
+            TimerId::ResizeCheck => check_resize(app, engine, timers)?,
         }
     }
+    Ok(())
 }
 
 /// Copy the rectangle `r` of the HUD buffer into the screen (char + fg + bg).
@@ -1581,9 +1645,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
-    // The event queue: one channel, one blocking consumer — the input thread
-    // is the only crossterm reader, and it pushes events here.
-    let (tx, rx) = mpsc::channel::<InputEvent>();
+    // The input thread is the only crossterm reader; the loop owns the
+    // receiving end and a single sender, which is moved into that thread.
+    let (tx, rx) = mpsc::channel::<InputMessage>();
 
     enable_raw_mode()?;
     // From here on every exit path (return value, `?` error or panic) must
@@ -1614,7 +1678,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // other window, so the app drops its holds itself on FocusLost.
     let _ = execute!(stdout, EnableFocusChange);
 
-    // Probe key-up support before the input thread exists. The probe can block
+    // Probe key-up support before the event loop starts. The probe can block
     // for up to two seconds on a terminal that never answers, so it runs while
     // the finite model load does.
     let key_up_probe = thread::spawn(terminal_reports_key_up);
@@ -1633,11 +1697,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Input thread: block in the kernel on the tty, push events through the
     // channel. Started after raw mode so the tty is in the expected state.
-    spawn_input_thread(tx.clone());
+    spawn_input_thread(tx)?;
 
     // L2 engine + viewer state.
     let (current_model, model_name) = loaded;
-    let (cols, rows) = crossterm::terminal::size()?;
+    let (cols, rows) = terminal_size()?;
     let mut app = App::new(
         current_model,
         model_name,
@@ -1660,29 +1724,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         let dt = (now - last).as_secs_f64().min(MAX_FRAME_DT.as_secs_f64());
         last = now;
 
-        // The two SDL-style loop modes: animating = drain +
-        // update + render as fast as possible, no waiting; idle = block in
-        // the channel until the earliest timer or an event.
-        let animating = app.auto_spin || app.input.is_active();
-
-        if animating {
-            // Drain the event backlog (no waiting, no cap).
-            while let Ok(InputEvent { at, event }) = rx.try_recv() {
-                match event {
-                    Event::Resize(cols, rows) => {
-                        engine.resize(cols as usize, rows as usize);
-                        app.dirty = true;
-                    }
-                    ev => {
-                        if app.handle_input_at(ev, at) {
-                            break 'main;
-                        }
+        // Drain what the reader has queued; the loop never blocks here.
+        loop {
+            match rx.try_recv() {
+                Ok(message) => {
+                    if apply_input_message(&mut app, &mut engine, message)? {
+                        break 'main;
                     }
                 }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return Err(input_thread_stopped().into()),
             }
-            // Timers can fire mid-animation too.
-            fire_due_timers(&mut app, &mut engine, &mut timers, now);
-            // One frame of smooth motion for every held key.
+        }
+        fire_due_timers(&mut app, &mut engine, &mut timers, Instant::now())?;
+
+        // Animating is the no-wait mode: one frame of motion, then straight
+        // back to the top. There is deliberately no frame budget.
+        if app.auto_spin || app.input.is_active() {
             app.advance_input(Instant::now(), dt);
             if app.auto_spin {
                 // Space auto-spin: rotate the model around its own (local) Y
@@ -1693,54 +1751,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                 app.view.normalize();
             }
             render_frame(&mut app, &mut engine, &mut stdout)?;
-        } else {
-            // Idle: block until the earliest pending timer or an event —
-            // the thread is parked in the kernel (0% CPU).
-            let wait = timers
-                .earliest()
-                .map(|d| d.saturating_duration_since(Instant::now()));
-            let msg: Result<InputEvent, mpsc::RecvTimeoutError> = match wait {
-                Some(t) => rx.recv_timeout(t),
-                None => match rx.recv() {
-                    Ok(e) => Ok(e),
-                    Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
-                },
-            };
-            // The blocked wait is not motion time: reset the frame clock so the
-            // first animated frame after a key press is not a 100 ms step.
-            let woke_at = Instant::now();
-            last = woke_at;
-            match msg {
-                Ok(InputEvent { at, event }) => {
-                    match event {
-                        Event::Resize(cols, rows) => {
-                            engine.resize(cols as usize, rows as usize);
-                            app.dirty = true;
-                        }
-                        ev => {
-                            if app.handle_input_at(ev, at) {
-                                break 'main;
-                            }
-                        }
-                    }
-                    // Due timers also advance while events keep arriving, so a
-                    // steady stream cannot starve them until the queue drains.
-                    fire_due_timers(&mut app, &mut engine, &mut timers, woke_at);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // The kernel woke us exactly at the earliest deadline.
-                    fire_due_timers(&mut app, &mut engine, &mut timers, woke_at);
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break 'main,
-            }
-            // A hold created by this event is advanced by the next animation
-            // frame, whose dt starts at the wake instant.
-            // Redraw only when something actually changed (dirty-flag).
-            if app.dirty {
-                render_frame(&mut app, &mut engine, &mut stdout)?;
-                app.dirty = false;
-            }
+            continue;
         }
+
+        // Redraw what the events changed before parking.
+        if app.dirty {
+            render_frame(&mut app, &mut engine, &mut stdout)?;
+            app.dirty = false;
+        }
+
+        // Idle: wait for the earliest timer or an event. The wait is bounded by
+        // the periodic size check, so a terminal that vanished is noticed even
+        // when no input ever arrives again.
+        let wait = timers.earliest().map_or(RESIZE_CHECK_INTERVAL, |deadline| {
+            deadline.saturating_duration_since(Instant::now())
+        });
+        let message = rx.recv_timeout(wait);
+        // The blocked wait is not motion time: restart the frame clock so the
+        // first animated frame after a wake is not a long step.
+        last = Instant::now();
+        match message {
+            Ok(message) => {
+                if apply_input_message(&mut app, &mut engine, message)? {
+                    break 'main;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(input_thread_stopped().into()),
+        }
+        fire_due_timers(&mut app, &mut engine, &mut timers, Instant::now())?;
     }
 
     // The TerminalGuard created after enable_raw_mode restores the terminal
@@ -1751,7 +1790,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::HOLD_WATCHDOG;
     use crate::motion::Motion;
     use crate::motion::TAP_PAN;
     use std::fs;
@@ -2761,7 +2799,8 @@ mod tests {
         );
         assert_ne!(app.view.yaw, yaw0, "a press gives immediate feedback");
         let yaw1 = app.view.yaw;
-        // Auto-repeat: must not add a new entry.
+        // A duplicate Press (the terminal lost a Release) must not accumulate
+        // held entries; it re-syncs the one hold.
         app.handle_input(Event::Key(KeyEvent::new(
             KeyCode::Right,
             KeyModifiers::NONE,
@@ -2769,7 +2808,7 @@ mod tests {
         assert_eq!(
             app.input.hold_count(),
             1,
-            "auto-repeat must not accumulate held entries"
+            "a duplicate Press must not accumulate held entries"
         );
         // Continuous motion is applied by advance_input.
         app.advance_input(Instant::now(), 0.016);
@@ -2801,50 +2840,35 @@ mod tests {
     }
 
     #[test]
-    fn legacy_auto_repeat_scales_by_the_event_gap() {
-        // A terminal without key-up reports repeats as more Press events. The
-        // first event after the initial repeat delay is a tap; steady repeats
-        // are scaled by their gap, so 25 Hz and 50 Hz repeat settings produce
-        // the same speed instead of 25 or 50 tap-sized steps per second.
+    fn legacy_auto_repeat_steps_once_per_event() {
+        // A terminal without key-up reports repeats as more Press events. Each
+        // event is one finite step; the terminal's own repeat setting is the
+        // cadence, so the viewer does not invent a hold from event timing.
         let mut app = app_with("cube");
         let speed = app.translation_speed();
         let t0 = Instant::now();
         let press = || Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
-        let pan0 = app.view.pan_x;
-        app.handle_input_at(press(), t0);
-        let after_press = app.view.pan_x;
-        assert!(
-            (pan0 - after_press - speed * TAP_PAN).abs() < 1e-12,
-            "the first press is one finite pan step"
-        );
-
-        // The first auto-repeat after the initial delay is still a tap: scaling
-        // it by the whole delay would jump.
-        app.handle_input_at(press(), t0 + Duration::from_millis(600));
-        let after_first_repeat = app.view.pan_x;
-        assert!(
-            (after_press - after_first_repeat - speed * TAP_PAN).abs() < 1e-12,
-            "the first repeat after the delay must not jump"
-        );
-
-        // The next repeat arrives 40 ms later: one frame of continuous motion,
-        // not another tap fraction.
-        app.handle_input_at(press(), t0 + Duration::from_millis(640));
-        let after_second_repeat = app.view.pan_x;
-        let step = after_first_repeat - after_second_repeat;
-        assert!(
-            (step - speed * 0.040).abs() < 1e-12,
-            "a repeat step must follow its gap: {step} vs {}",
-            speed * 0.040
-        );
+        let mut pan = app.view.pan_x;
+        for at in [
+            t0,
+            t0 + Duration::from_millis(600),
+            t0 + Duration::from_millis(640),
+        ] {
+            app.handle_input_at(press(), at);
+            assert!(
+                (pan - app.view.pan_x - speed * TAP_PAN).abs() < 1e-12,
+                "every legacy event is one finite pan step"
+            );
+            pan = app.view.pan_x;
+        }
         assert!(!app.input.is_active(), "legacy repeats never create a hold");
     }
 
     #[test]
-    fn app_repeat_promotes_a_hold_when_key_up_is_learned_mid_press() {
+    fn app_repeat_starts_a_hold_when_key_up_is_learned_mid_press() {
         // The first press is a legacy tap; a Release of another key then proves
-        // key-up works. The still-held key's next Repeat must promote it to a
-        // hold instead of being swallowed until the user releases and re-presses.
+        // key-up works. The still-held key's next Repeat starts the hold
+        // instead of waiting for the user to release and re-press.
         let mut app = app_with("cube");
         let t0 = Instant::now();
         app.handle_input_at(
@@ -2852,45 +2876,24 @@ mod tests {
             t0,
         );
         assert!(!app.input.is_active(), "cold press is still a finite tap");
-        assert!(app.input.has_legacy(KeyCode::Char('h')));
 
         let mut release = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         app.handle_input_at(Event::Key(release), t0 + Duration::from_millis(10));
         assert!(app.input.reports_key_up());
 
+        let yaw = app.view.yaw;
         let mut repeat = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
         repeat.kind = KeyEventKind::Repeat;
         app.handle_input_at(Event::Key(repeat), t0 + Duration::from_millis(20));
         assert_eq!(
             app.input.held_motion(KeyCode::Char('h')),
             Some(Motion::YawLeft),
-            "the Repeat must promote the still-held key"
+            "the Repeat must start the still-held key"
         );
-        assert!(
-            !app.input.has_legacy(KeyCode::Char('h')),
-            "the promoted hold no longer needs the legacy repeat clock"
-        );
-    }
-
-    #[test]
-    fn app_lost_release_watchdog_stops_a_hold() {
-        let mut app = app_with("cube");
-        app.input.set_key_up(true);
-        app.handle_input(Event::Key(KeyEvent::new(
-            KeyCode::Right,
-            KeyModifiers::NONE,
-        )));
-        assert_eq!(app.input.hold_count(), 1);
-        app.input
-            .note_key(Instant::now() - HOLD_WATCHDOG - Duration::from_millis(1));
-        app.dirty = false;
-        app.advance_input(Instant::now(), 0.016);
-        assert!(
-            !app.input.is_active(),
-            "a lost Release must not move forever"
-        );
-        assert!(app.dirty, "clearing the watchdog hold must repaint");
+        assert_eq!(app.view.yaw, yaw, "the Repeat only starts the hold");
+        app.advance_input(t0 + Duration::from_millis(20), 0.01);
+        assert!(app.view.yaw < yaw, "the hold now moves the view");
     }
 
     /// The roll keys (`d` / `f`) roll the MODEL about the world Z axis — the
@@ -3086,9 +3089,8 @@ mod tests {
 
     #[test]
     fn app_hold_survives_silence_until_release() {
-        // A live hold survives ordinary silence: auto-repeat may be slow or off,
-        // and silence is not evidence of a released key. The lost-Release
-        // watchdog is the separate, deliberately long backstop.
+        // A live hold survives silence: auto-repeat may be slow or off, and
+        // silence is not evidence of a released key. Release is the stop.
         let mut app = app_with("cube");
         app.input.set_key_up(true);
         app.handle_input(Event::Key(KeyEvent::new(

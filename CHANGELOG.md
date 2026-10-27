@@ -40,8 +40,15 @@ carried in git on that date.
 - Holding a motion key now steps from the slow gear to a fixed 2× fast gear
   after 200 ms. It is two gears, not continuous acceleration: releasing resets
   the next press to the slow gear, and rotation, pan and zoom share the same
-  step. Auto-spin is unaffected; legacy terminals keep their event-scaled
-  repeats.
+  step. Auto-spin is unaffected; a terminal without key-up has no hold, so
+  every event it sends is one finite step at that terminal's repeat cadence.
+- Motion input is one state machine: a hold exists only while a key-up terminal
+  says the key is down. The 10-second silence watchdog is gone, and a duplicate
+  Press re-syncs a lost Release instead of being swallowed.
+- The viewer reads terminal events through one input thread that reports read
+  errors. The loop owns the session and ends it with the terminal restored
+  instead of blocking forever on a dead input source; the periodic size check
+  is also the terminal health check.
 - The bar carries no key hints: the menu's Key Bindings is the only place the
   chords are listed. On a narrow row the lamps go first, then the readout sheds
   from the right.
@@ -77,13 +84,10 @@ carried in git on that date.
   press into a pause followed by tap-repeat.
 - Idle wake no longer counts the blocked wait as one 100 ms motion frame; a
   slow frame uses its real elapsed time up to one second.
-- Auto-repeat on a terminal without key-up is scaled by the gap between events,
-  so its speed no longer follows the terminal's repeat rate.
-- A Repeat promotes an already-held key to a continuous hold when key-up support
-  is learned from another key's Release, and a lost Release is bounded by a
-  watchdog instead of moving the model forever.
-- On a terminal that cannot report key-up, a tap is one finite step instead of
-  a one-second drift.
+- A Release from any key teaches key-up support, so a still-held key's next
+  Repeat starts its hold when the start-up probe was hidden.
+- On a terminal that cannot report key-up, every Press and auto-repeat is one
+  finite step instead of a one-second drift.
 - `Ctrl+Shift+C` no longer quits (it is a terminal copy shortcut); `Ctrl+C`
   still quits.
 - The key panel's right column starts at the same offset on every row: the

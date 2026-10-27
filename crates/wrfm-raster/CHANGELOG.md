@@ -12,6 +12,15 @@ version this crate's `Cargo.toml` carried in git on that date. Sibling histories
 
 ## [Unreleased]
 
+### Changed
+
+- The FOV constants speak both surface units: `DEFAULT_VFOV_DEG = 30.0` is the
+  default vertical FOV in degrees (the unit CLI parameters and TUI readouts
+  use) and `DEFAULT_VFOV` derives from it — 30° in radians, the unit every
+  projection entry point takes. `MAX_VFOV` (3.0 radians) is replaced by
+  `MAX_VFOV_DEG = 180.0`, the exclusive upper bound the CLI surfaces validate
+  against.
+
 ## [0.2.0] - 2026-10-19
 
 ### Added

@@ -12,6 +12,13 @@ this crate's `Cargo.toml` carried in git on that date. Sibling histories:
 
 ## [Unreleased]
 
+### Changed
+
+- `wrfm render` / `wrfm view` take `--vfov` in **degrees** (default 30, valid
+  range (0, 180), decimals welcome) and the render header echoes
+  `vfov=… deg`. The FOV is radians inside the crate and the CLI boundary
+  converts, as it already did for `--pitch` / `--yaw` / `--roll`.
+
 ## [0.2.0] - 2026-10-19
 
 ### Added

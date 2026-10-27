@@ -32,6 +32,11 @@ carried in git on that date.
 
 ### Changed
 
+- `--vfov` now takes **degrees** (default 30, valid range (0, 180), decimals
+  welcome) — the unit the camera readout already spoke. The projection keeps
+  working in radians internally and the boundary converts, as it already did
+  for pitch / yaw / roll; `wireforge model.wrfm --vfov 0.5` is now half a
+  degree, not half a radian.
 - Holding a motion key now steps from the slow gear to a fixed 2× fast gear
   after 200 ms. It is two gears, not continuous acceleration: releasing resets
   the next press to the slow gear, and rotation, pan and zoom share the same

@@ -21,7 +21,7 @@ numbers.
   JSON (`jq -r '.groups[] | "\(.name):\(.verdict)"'` for a one-line verdict list).
 * **Character rendering.** `wrfm render` draws braille / ascii / grid to the terminal (six standard views,
   `--fit content` auto-framing, region zoom), using the same projection as the `wireforge` viewer.
-* **Safe edits over streams.** `wrfm transform` (rigid: rotate / scale / shear / mirror / translate / pivot / align /
+* **Safe edits over streams.** `wrfm transform` (affine: rotate / scale / shear / mirror / translate / pivot / align /
   normalize) and `wrfm edit` (topology: delete / extract / clean / dedupe / weld / merge) print the result to stdout,
   ready to chain with pipes and verify with `wrfm check`.
 * **OBJ into the pipeline.** `wrfm convert` reads a Wavefront OBJ (a deliberate subset: `v` vertices, `f` face
@@ -119,9 +119,10 @@ The `suggestion` field is a hint, not a ready-made pipeline: the three
 one command such as `wrfm transform model.wrfm --scale 0.5`, which halves all
 three axes.
 
-`check` warns about *redundant* vertices: degree-2 midpoints that lie exactly
-on the chord between their neighbours (degenerate data such as collapsed
-control rows). Ordinary corners and closed loops are not reported.
+`check` warns about *redundant* vertices: degree-2 midpoints that lie on the
+segment between their neighbours, within 1e-6 world units (degenerate data
+such as collapsed control rows). Ordinary corners and closed loops are not
+reported.
 `--expect-redundant N` declares the exact count you accept, so the gate
 still catches a newly introduced one:
 
@@ -266,13 +267,14 @@ wrfm check m.wrfm | head -1
 
 # canonical-form CI gate (mirrors cargo fmt --check -q) — `fmt` takes one
 # FILE per call, so a glob goes through a loop. Exit 0 if the file is already
-# in canonical v2 surface form, exit 1 if re-canonicalization would change
-# bytes — the surface verdict travels on the exit code alone, no stdout with -q
+# in canonical v2 surface form, exit 1 if it is not — the surface verdict
+# travels on the exit code alone, no stdout with -q. A leading BOM and CRLF
+# line endings do not count as a difference.
 for f in *.wrfm; do wrfm fmt "$f" --check -q || echo "not canonical: $f"; done
 
 # see what canonicalization would change (no unified diff yet; pipe the
 # canonical output into diff yourself)
-diff <(wrfm fmt file.wrfm --check) file.wrfm
+diff <(wrfm fmt file.wrfm) file.wrfm
 
 # render a group as its own model (compare parts without touching the file)
 wrfm edit m.wrfm --extract-group g | wrfm render -
@@ -303,7 +305,7 @@ script can branch on the number alone:
 | code | meaning |
 | :--- | :--- |
 | `0` | ok — result produced, health `ok` (`verify: pass`, `diff`, `fmt`, `format`, help) |
-| `1` | warn — result produced with a warning-level issue (`check: warn`; `fmt --check`: the surface is not canonical) |
+| `1` | warn — a warning-level issue (`check: warn`) or a surface that is not canonical (`fmt --check`) |
 | `2` | broken — repair is required (`check: broken`, `verify: fail`; `--strict` upgrades a warn to this) |
 | `3` | no result — unreadable file, corrupt model, or usage error (including clap's own argument errors) |
 
@@ -311,8 +313,10 @@ script can branch on the number alone:
 `edit` / `convert` still emit their result on stdout and only the exit code
 carries the health tier; `check` puts its report on stdout and exits 1 for
 `warn`, 2 for `broken`. `diff`, `fmt` and `format` report their own result
-instead and carry no health tier: `fmt --check` exits 1 for a surface it would
-rewrite, exactly as `cargo fmt --check` does.
+instead and carry no health tier: `fmt --check` exits 1 for a surface that is
+not canonical, exactly as `cargo fmt --check` does. It compares the file
+against the canonical form with a leading BOM and CRLF line endings
+normalized away, so those two do not count as a difference.
 
 ```bash
 wrfm check model.wrfm; echo "exit $?"

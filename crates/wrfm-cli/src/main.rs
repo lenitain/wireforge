@@ -77,7 +77,9 @@ STREAMS (three-channel contract — read this before piping):
            verify fail, or --strict upgrading a warn) · 3 no result
            (unreadable file, corrupt model, or usage error).
            `diff` / `fmt` / `format` carry no health tier: `fmt --check`
-           exits 1 for a surface it would rewrite, like `cargo fmt --check`.
+           exits 1 for a surface that is not canonical (a leading BOM and
+           CRLF line endings are normalized away first), like
+           `cargo fmt --check`.
   To pipe JSON/data do NOT merge stderr: use `wrfm info a.wrfm 2>/dev/null`
   (never `2>&1`) so diagnostics cannot corrupt the data stream.
   A consumer that closes the pipe early (e.g. `wrfm render m.wrfm | head`)
@@ -114,7 +116,7 @@ Authoritative spec: docs/wrfm-spec.md in the repository (https://github.com/leni
     name = "wrfm",
     version,
     about = "Read-only streaming CLI for .wrfm 3D wireframe models",
-    after_help = "Every model-input command accepts '-' for stdin. Nothing writes a file: use shell redirection.\nExit codes: 0 ok (clean result / verify pass) · 1 warn (a warning-level health issue in the model; every health-reporting data command still prints its result and exits 1 — only `check` prints the report) · 2 broken (repair required: check broken, an unmet verify declaration, or --strict upgrading a warn) · 3 no result (unreadable file, corrupt model, or usage error). `diff` / `fmt` / `format` carry no health tier — `fmt --check` exits 1 for a surface it would rewrite, as `cargo fmt --check` does.\nPoint identity: vertices strictly closer than 1e-6 world units are the SAME point — `check` reports them as near-duplicate vertices and `wrfm edit --weld 1e-6` merges them (absolute threshold; pass an explicit --weld TOL when the model's units are far from 1).\n--format text|json exists on `check` / `query` / `diff` and selects their OUTPUT ENCODING: json is the machine-readable form, text is its projection (`info` / `geometry` / `group` / `view` always print JSON). `render --format` names the render style instead (braille|ascii|grid|both).\nRepair map (finding -> command): duplicate vertices -> --dedupe · near-duplicate vertices -> --weld 1e-6 · duplicate edges -> --dedupe · zero-length or dangling edges -> --clean · isolated vertices -> --clean · redundant (collinear degree-2) vertices have no repair action — accept them with `wrfm verify --expect-redundant N`.\nstderr carries diagnostics and errors only — the health verdict travels on the exit code (run `wrfm check` for the report).\nCompose atomic operations with pipes, e.g.:\n  wrfm edit m.wrfm --extract-group body | wrfm transform - --scale 2 --rotate-y 45\n  wrfm transform m.wrfm --mirror x | wrfm edit - --clean\nFormat spec: wrfm format (self-contained; no source needed)."
+    after_help = "Every model-input command accepts '-' for stdin. Nothing writes a file: use shell redirection.\nExit codes: 0 ok (clean result / verify pass) · 1 warn (a warning-level health issue in the model; every health-reporting data command still prints its result and exits 1 — only `check` prints the report) · 2 broken (repair required: check broken, an unmet verify declaration, or --strict upgrading a warn) · 3 no result (unreadable file, corrupt model, or usage error). `diff` / `fmt` / `format` carry no health tier — `fmt --check` exits 1 for a surface that is not canonical (a leading BOM and CRLF line endings are normalized away first), as `cargo fmt --check` does.\nPoint identity: vertices strictly closer than 1e-6 world units are the SAME point — `check` reports them as near-duplicate vertices and `wrfm edit --weld 1e-6` merges them (absolute threshold; pass an explicit --weld TOL when the model's units are far from 1).\n--format text|json exists on `check` / `query` / `diff` and selects their OUTPUT ENCODING: json is the machine-readable form, text is its projection (`info` / `geometry` / `group` / `view` always print JSON). `render --format` names the render style instead (braille|ascii|grid|both).\nRepair map (finding -> command): duplicate vertices -> --dedupe · near-duplicate vertices -> --weld 1e-6 · duplicate edges -> --dedupe · zero-length or dangling edges -> --clean · isolated vertices -> --clean · redundant (collinear degree-2) vertices have no repair action — accept them with `wrfm verify --expect-redundant N`.\nstderr carries diagnostics and errors only — the health verdict travels on the exit code (run `wrfm check` for the report).\nCompose atomic operations with pipes, e.g.:\n  wrfm edit m.wrfm --extract-group body | wrfm transform - --scale 2 --rotate-y 45\n  wrfm transform m.wrfm --mirror x | wrfm edit - --clean\nFormat spec: wrfm format (self-contained; no source needed)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -399,11 +401,11 @@ enum Command {
         #[arg(long, default_value = "text")]
         format: String,
     },
-    /// Re-emit a .wrfm file in canonical v2 surface form: single magic + counts header, shortest round-trip coordinates, LF line endings, BOM stripped, single blank separators between sections. Surfaces that the parser accepts but the formatter normalizes: leading UTF-8 BOM, CRLF, excess blank lines, decorative `#` comments, and decimals like `1.0`. Today `#` comments are dropped silently (preservation is a planned addition; until then `--strip-comments` is implicit). `wrfm fmt` only re-emits the SURFACE — geometry is untouched. Use `wrfm transform` (rigid) or `wrfm edit` (topology) to change geometry.
+    /// Re-emit a .wrfm file in canonical v2 surface form: single magic + counts header, shortest round-trip coordinates, LF line endings, BOM stripped, single blank separators between sections. Surfaces that the parser accepts but the formatter normalizes: excess blank lines, decorative `#` comments, and decimals like `1.0`. Today `#` comments are dropped silently (preservation is a planned addition; until then `--strip-comments` is implicit). `wrfm fmt` only re-emits the SURFACE — geometry is untouched. Use `wrfm transform` (affine) or `wrfm edit` (topology) to change geometry.
     Fmt {
         /// Path to the .wrfm file, or '-' to read the model from stdin.
         file: String,
-        /// Exit non-zero if re-canonicalization would change bytes (exit 1, exactly as `cargo fmt --check` does — `fmt` carries no health tier); print the canonical form to stdout so `diff <(file) <(wrfm fmt file --check)` shows the exact change.
+        /// Exit non-zero if the file is not already in canonical form (exit 1, exactly as `cargo fmt --check` does — `fmt` carries no health tier); print the canonical form to stdout so `diff <(file) <(wrfm fmt file)` shows the exact change. A leading BOM and CRLF line endings are normalized before the comparison, so they do not count as a difference.
         #[arg(short, long)]
         check: bool,
         /// Suppress all stdout output (the canonical verdict still travels on the exit code; mirrors `cargo fmt -q`).
@@ -1659,17 +1661,21 @@ fn cmd_diff(a: &str, b: &str, format: &str) -> i32 {
 /// `wrfm fmt` — read a `.wrfm` file and re-emit it in canonical v2 surface form
 /// (single magic + counts header, shortest round-trip coordinates, LF, BOM stripped,
 /// single blank separators). Surfaces the parser accepts but the formatter
-/// normalizes: leading UTF-8 BOM, CRLF, excess blank lines, decorative `#`
-/// comments, and decimals like `1.0`. `#` comments are dropped silently in this
-/// version — preservation is a planned addition.
+/// normalizes: excess blank lines, decorative `#` comments, and decimals like
+/// `1.0`. `#` comments are dropped silently in this version — preservation is a
+/// planned addition.
 ///
 /// `fmt` works on the SURFACE only, so its exit code carries no health tier
 /// (like `wrfm format` / `wrfm diff`): it reports the bytes and nothing else,
 /// exactly what `cargo fmt` / `cargo fmt --check` do.
 ///
+/// `--check` compares the canonical emission against the file with a leading
+/// BOM and CRLF line endings normalized away, so those two never count as a
+/// difference.
+///
 /// Exit codes:
 /// * 0 — the surface was emitted, or `--check` found it already canonical.
-/// * 1 — `--check` only: re-canonicalization would change bytes.
+/// * 1 — `--check` only: the file is not in canonical form.
 /// * 3 — I/O, UTF-8 or parse failure.
 fn cmd_fmt(file: &str, check: bool, quiet: bool) -> i32 {
     // Read raw bytes once. `-` consumes stdin, so the existing `load::load`

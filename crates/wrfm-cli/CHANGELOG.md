@@ -19,10 +19,11 @@ this crate's `Cargo.toml` carried in git on that date. Sibling histories:
 - `wrfm convert` turns OBJ models into `.wrfm`.
 - `wrfm fmt [--check] [-q]` re-emits a `.wrfm` file in canonical v2 surface form
   (shortest round-trip coordinates, single blank separators, BOM stripped,
-  CRLF→LF). `--check` exits 1 if re-canonicalization would change bytes
-  (mirrors `cargo fmt --check`); `-q` silences stdout. `fmt` reports the
-  surface only and carries no health tier, like `diff` / `format`.
-  Decorative `#` comments are dropped in this version —
+  CRLF→LF). `--check` exits 1 if the file is not already in canonical form
+  (mirrors `cargo fmt --check`; a leading BOM and CRLF line endings are
+  normalized away first, so they never count as a difference); `-q` silences
+  stdout. `fmt` reports the surface only and carries no health tier, like
+  `diff` / `format`. Decorative `#` comments are dropped in this version —
   preservation is a planned addition.
 - `edit --weld TOL` merges vertices closer than `TOL`, and `render --fit
   content` frames each view so it fills the canvas.

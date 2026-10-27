@@ -12,6 +12,8 @@ version this crate's `Cargo.toml` carried in git on that date. Sibling histories
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-27
+
 ### Changed
 
 - The FOV constants speak both surface units: `DEFAULT_VFOV_DEG = 30.0` is the
